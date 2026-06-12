@@ -140,7 +140,70 @@ pub fn reconstruct_messages(request: &api::Request) -> Vec<Value> {
     }
 
     append_input(request, &mut builder);
-    builder.finish()
+    let messages = builder.finish();
+    sanitize_tool_pairing(messages)
+}
+
+/// Enforces the provider invariant that every assistant `tool_calls` entry has
+/// exactly one matching `tool` result and vice versa. Drops assistant tool
+/// calls whose result is missing and orphan tool results whose call is missing
+/// (which otherwise trigger MiniMax's "tool call and result not match" (2013)).
+fn sanitize_tool_pairing(messages: Vec<Value>) -> Vec<Value> {
+    use std::collections::HashSet;
+
+    let call_ids: HashSet<String> = messages
+        .iter()
+        .filter_map(|m| m["tool_calls"].as_array())
+        .flatten()
+        .filter_map(|c| c["id"].as_str().map(str::to_owned))
+        .collect();
+    let result_ids: HashSet<String> = messages
+        .iter()
+        .filter(|m| m["role"] == "tool")
+        .filter_map(|m| m["tool_call_id"].as_str().map(str::to_owned))
+        .collect();
+    let valid: HashSet<&String> = call_ids.intersection(&result_ids).collect();
+
+    let mut out = Vec::with_capacity(messages.len());
+    for mut message in messages {
+        if message["role"] == "tool" {
+            // Drop orphan tool results.
+            let keep = message["tool_call_id"]
+                .as_str()
+                .is_some_and(|id| valid.contains(&id.to_string()));
+            if keep {
+                out.push(message);
+            }
+            continue;
+        }
+        if message["tool_calls"].is_array() {
+            // Retain only tool calls that have a matching result.
+            let kept: Vec<Value> = message["tool_calls"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|c| {
+                    c["id"]
+                        .as_str()
+                        .is_some_and(|id| valid.contains(&id.to_string()))
+                })
+                .cloned()
+                .collect();
+            let has_content = message["content"].as_str().is_some_and(|s| !s.is_empty());
+            if kept.is_empty() {
+                // No surviving tool calls: keep as a content message, or drop.
+                if has_content {
+                    out.push(json!({"role": "assistant", "content": message["content"].clone()}));
+                }
+                continue;
+            }
+            message["tool_calls"] = Value::Array(kept);
+            out.push(message);
+            continue;
+        }
+        out.push(message);
+    }
+    out
 }
 
 /// Accumulates OpenAI-format chat messages, buffering assistant tool calls so

@@ -45,15 +45,56 @@ pub async fn run_turn(
             ),
         ];
     };
+    let custom_provider_count = request
+        .settings
+        .as_ref()
+        .and_then(|s| s.custom_model_providers.as_ref())
+        .map(|c| c.providers.len())
+        .unwrap_or(0);
+    eprintln!(
+        "warp-max-server: resolved base_url={} model={} api_key_len={} custom_providers={}",
+        provider.base_url,
+        provider.model,
+        provider.api_key.len(),
+        custom_provider_count
+    );
+
     if provider.base_url.trim().is_empty() {
         return vec![
             init,
             sse::finished_error("Configured endpoint has an empty URL.".to_string()),
         ];
     }
+    if provider.api_key.trim().is_empty() {
+        return vec![
+            init,
+            sse::finished_error(format!(
+                "No API key for the selected model. Make sure the model you picked is your \
+                 custom endpoint (e.g. MiniMax Token Plan) configured in Settings → AI → Custom \
+                 inference with a non-empty key — or run `warp login --api-key sk-...`. \
+                 (Resolved endpoint: {}, model: {}.)",
+                provider.base_url, provider.model
+            )),
+        ];
+    }
 
     let mut messages = vec![serde_json::json!({"role": "system", "content": SYSTEM_PROMPT})];
     messages.extend(history::reconstruct_messages(&request));
+
+    let shape: Vec<String> = messages
+        .iter()
+        .map(|m| {
+            let role = m["role"].as_str().unwrap_or("?");
+            if let Some(tc) = m["tool_calls"].as_array() {
+                format!("{role}[tc:{}]", tc.len())
+            } else if role == "tool" {
+                format!("tool({})", m["tool_call_id"].as_str().unwrap_or(""))
+            } else {
+                role.to_string()
+            }
+        })
+        .collect();
+    eprintln!("warp-max-server: messages=[{}]", shape.join(", "));
 
     // For a new conversation the client sends no tasks and expects the server
     // to create the root task (it then re-keys its pending exchange to our id).
