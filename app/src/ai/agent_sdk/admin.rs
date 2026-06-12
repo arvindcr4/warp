@@ -13,6 +13,16 @@ use crate::workspaces::user_workspaces::UserWorkspaces;
 
 /// Kick off a device authorization login flow and handle auth events.
 pub fn login(api_key: Option<String>, ctx: &mut AppContext) -> Result<()> {
+    if api_key.is_none()
+        && matches!(
+            warp_core::channel::ChannelState::channel(),
+            warp_core::channel::Channel::Oss
+        )
+    {
+        println!("Warp Max only supports login via API keys (e.g. `warp login --api-key sk-...`).");
+        return Ok(());
+    }
+
     let auth_state = AuthStateProvider::as_ref(ctx).get();
     let has_cached_credentials = auth_state.is_logged_in();
 
@@ -24,15 +34,7 @@ pub fn login(api_key: Option<String>, ctx: &mut AppContext) -> Result<()> {
     // that arrive before device auth has started are leftover refresh
     // errors and should be ignored rather than treated as terminal.
     let mut started_device_auth = !has_cached_credentials;
-    
-    // If an API key was provided via the CLI, exchange it and skip the browser flow.
-    if let Some(key) = api_key {
-        AuthManager::handle(ctx).update(ctx, |auth_manager, ctx| {
-            auth_manager.fetch_user(crate::auth::credentials::LoginToken::ApiKey(key), false);
-        });
-        println!("Logging in with API key...");
-        return Ok(());
-    }
+    let is_api_key_login = api_key.is_some();
 
     ctx.subscribe_to_model(
         &AuthManager::handle(ctx),
@@ -60,7 +62,7 @@ pub fn login(api_key: Option<String>, ctx: &mut AppContext) -> Result<()> {
                 }
             }
             AuthManagerEvent::AuthFailed(_) => {
-                if !started_device_auth {
+                if !started_device_auth && !is_api_key_login {
                     // Refresh failed - start a fresh device auth flow.
                     started_device_auth = true;
                     AuthManager::handle(ctx).update(ctx, |auth_manager, ctx| {
@@ -97,9 +99,12 @@ pub fn login(api_key: Option<String>, ctx: &mut AppContext) -> Result<()> {
         },
     );
 
-    // Either refresh existing credentials or start device auth from scratch.
+    // Either authenticate via API key, refresh existing credentials, or start device auth from scratch.
     AuthManager::handle(ctx).update(ctx, |auth_manager, ctx| {
-        if has_cached_credentials {
+        if let Some(key) = api_key {
+            auth_manager
+                .fetch_user_with_token(ctx, crate::auth::credentials::LoginToken::ApiKey(key));
+        } else if has_cached_credentials {
             auth_manager.refresh_user(ctx);
         } else {
             auth_manager.authorize_device(ctx);

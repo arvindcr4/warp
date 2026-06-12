@@ -68,7 +68,12 @@ async fn main() -> anyhow::Result<()> {
 
 /// The core agent endpoint: decode the protobuf `Request`, run one provider
 /// turn, and stream the resulting `ResponseEvent`s back as SSE frames.
-async fn handle_multi_agent(body: Bytes) -> Response {
+async fn handle_multi_agent(headers: axum::http::HeaderMap, body: Bytes) -> Response {
+    let auth_header_api_key = headers
+        .get("Authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(|v| v.to_string());
     let request = match api::Request::decode(body.as_ref()) {
         Ok(request) => request,
         Err(e) => {
@@ -85,7 +90,7 @@ async fn handle_multi_agent(body: Bytes) -> Response {
     };
 
     let client = reqwest::Client::new();
-    let events = run_turn(&client, request).await;
+    let events = run_turn(&client, request, auth_header_api_key).await;
     let frames = events.iter().map(sse::frame).collect();
     sse_response(frames)
 }
@@ -99,6 +104,36 @@ async fn handle_graphql(body: Bytes) -> Response {
         json!({"data": {"featureModelChoices": null}})
     } else if query.contains("Conversations") || query.contains("conversations") {
         json!({"data": {"listAiConversations": {"conversations": []}}})
+    } else if query.contains("GetUser") || query.contains("getUser") {
+        json!({"data": {"user": {
+            "__typename": "UserOutput",
+            "principalType": "USER",
+            "apiKeyOwnerType": null,
+            "user": {
+                "__typename": "User",
+                "isOnboarded": true,
+                "isOnWorkDomain": false,
+                "globalSkills": [],
+                "experiments": [],
+                "anonymousUserInfo": null,
+                "llms": {
+                    "__typename": "FeatureModelChoice",
+                    "agentMode": { "defaultId": "", "choices": [], "preferredCodexModelId": null },
+                    "planning": { "defaultId": "", "choices": [], "preferredCodexModelId": null },
+                    "coding": { "defaultId": "", "choices": [], "preferredCodexModelId": null },
+                    "cliAgent": { "defaultId": "", "choices": [], "preferredCodexModelId": null },
+                    "computerUseAgent": { "defaultId": "", "choices": [], "preferredCodexModelId": null }
+                },
+                "profile": {
+                    "__typename": "FirebaseProfile",
+                    "uid": "warp-max-user",
+                    "displayName": "Warp Max User",
+                    "email": "warp-max@localhost",
+                    "needsSsoLink": false,
+                    "photoUrl": null
+                }
+            }
+        }}})
     } else {
         json!({"data": null})
     };

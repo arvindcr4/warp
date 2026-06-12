@@ -261,6 +261,15 @@ impl AuthManager {
         );
     }
 
+    /// Authenticates the user with the given token.
+    pub fn fetch_user_with_token(&self, ctx: &mut ModelContext<Self>, token: LoginToken) {
+        let auth_client = self.auth_client.clone();
+        let _ = ctx.spawn(
+            async move { auth_client.fetch_user(token, false).await },
+            Self::on_user_fetched,
+        );
+    }
+
     /// Authenticate asynchronously using the OAuth2 device authorization flow.
     ///
     /// This is only used by the Warp CLI if running on a device that does not have the Warp app installed.

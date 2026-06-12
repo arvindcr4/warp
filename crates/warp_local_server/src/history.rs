@@ -23,7 +23,10 @@ pub struct Provider {
 /// matches and use its `base_url`/`api_key`. Falls back to env overrides
 /// (`WARP_MAX_BASE_URL`, `WARP_MAX_API_KEY`, `WARP_MAX_MODEL`) so the server is
 /// usable even before a custom endpoint is configured.
-pub fn resolve_provider(request: &api::Request) -> Option<Provider> {
+pub fn resolve_provider(
+    request: &api::Request,
+    auth_header_api_key: Option<String>,
+) -> Option<Provider> {
     let settings = request.settings.as_ref();
     let selected = settings
         .and_then(|s| s.model_config.as_ref())
@@ -43,20 +46,23 @@ pub fn resolve_provider(request: &api::Request) -> Option<Provider> {
             }
         }
         // No exact config_key match: if there's exactly one custom model, use it.
-        if let Some(provider) = providers.providers.first() {
-            if let Some(model) = provider.models.first() {
-                return Some(Provider {
-                    base_url: provider.base_url.clone(),
-                    api_key: provider.api_key.clone(),
-                    model: model.slug.clone(),
-                });
-            }
+        if providers.providers.len() == 1 && providers.providers[0].models.len() == 1 {
+            let provider = &providers.providers[0];
+            let model = &provider.models[0];
+            return Some(Provider {
+                base_url: provider.base_url.clone(),
+                api_key: provider.api_key.clone(),
+                model: model.slug.clone(),
+            });
         }
     }
 
     // Env fallback.
-    let base_url = std::env::var("WARP_MAX_BASE_URL").ok()?;
-    let api_key = std::env::var("WARP_MAX_API_KEY").unwrap_or_default();
+    let base_url = std::env::var("WARP_MAX_BASE_URL")
+        .ok()
+        .unwrap_or_else(|| "https://api.minimax.chat/v1".to_string());
+    let api_key = auth_header_api_key
+        .unwrap_or_else(|| std::env::var("WARP_MAX_API_KEY").unwrap_or_default());
     let model = std::env::var("WARP_MAX_MODEL").unwrap_or_else(|_| {
         if selected.is_empty() {
             "gpt-4o".to_string()
@@ -117,64 +123,111 @@ pub fn conversation_id(request: &api::Request) -> String {
 
 /// Reconstructs the OpenAI-format `messages` array from the request's task
 /// history plus the new turn in `input`.
+///
+/// Consecutive assistant tool calls are merged into a single assistant message
+/// with a `tool_calls` array, and any buffered tool calls are flushed
+/// immediately before a tool result — this preserves the strict ordering
+/// providers like MiniMax enforce ("tool call result must follow tool call").
 pub fn reconstruct_messages(request: &api::Request) -> Vec<Value> {
-    let mut messages: Vec<Value> = Vec::new();
-    let mut seen_tool_results: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut builder = MessageBuilder::default();
 
     if let Some(tc) = request.task_context.as_ref() {
         for task in &tc.tasks {
             for message in &task.messages {
-                append_history_message(message, &mut messages, &mut seen_tool_results);
+                append_history_message(message, &mut builder);
             }
         }
     }
 
-    append_input(request, &mut messages, &seen_tool_results);
-    messages
+    append_input(request, &mut builder);
+    builder.finish()
 }
 
-fn append_history_message(
-    message: &api::Message,
-    out: &mut Vec<Value>,
-    seen_tool_results: &mut std::collections::HashSet<String>,
-) {
+/// Accumulates OpenAI-format chat messages, buffering assistant tool calls so
+/// that parallel/consecutive calls collapse into one assistant message and tool
+/// results always follow it directly.
+#[derive(Default)]
+struct MessageBuilder {
+    messages: Vec<Value>,
+    pending_tool_calls: Vec<Value>,
+    seen_tool_results: std::collections::HashSet<String>,
+}
+
+impl MessageBuilder {
+    fn flush_tool_calls(&mut self) {
+        if !self.pending_tool_calls.is_empty() {
+            self.messages.push(json!({
+                "role": "assistant",
+                "content": Value::Null,
+                "tool_calls": std::mem::take(&mut self.pending_tool_calls),
+            }));
+        }
+    }
+
+    fn push_user(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        self.flush_tool_calls();
+        let dup = matches!(self.messages.last(), Some(last) if last["role"] == "user" && last["content"] == text);
+        if !dup {
+            self.messages.push(json!({"role": "user", "content": text}));
+        }
+    }
+
+    fn push_assistant_text(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        self.flush_tool_calls();
+        self.messages
+            .push(json!({"role": "assistant", "content": text}));
+    }
+
+    fn add_tool_call(&mut self, call: Value) {
+        self.pending_tool_calls.push(call);
+    }
+
+    fn push_tool_result(&mut self, tool_call_id: &str, content: String) {
+        if self.seen_tool_results.contains(tool_call_id) {
+            return;
+        }
+        self.seen_tool_results.insert(tool_call_id.to_string());
+        self.flush_tool_calls();
+        self.messages.push(json!({
+            "role": "tool",
+            "tool_call_id": tool_call_id,
+            "content": content,
+        }));
+    }
+
+    fn finish(mut self) -> Vec<Value> {
+        self.flush_tool_calls();
+        self.messages
+    }
+}
+
+fn append_history_message(message: &api::Message, builder: &mut MessageBuilder) {
     use api::message::Message as M;
     let Some(inner) = message.message.as_ref() else {
         return;
     };
     match inner {
-        M::UserQuery(uq) => push_user(out, &uq.query),
-        M::AgentOutput(ao) => {
-            if !ao.text.is_empty() {
-                out.push(json!({"role": "assistant", "content": ao.text}));
-            }
-        }
+        M::UserQuery(uq) => builder.push_user(&uq.query),
+        M::AgentOutput(ao) => builder.push_assistant_text(&ao.text),
         M::ToolCall(tc) => {
             if let Some(call) = tools::warp_tool_call_to_openai(tc) {
-                out.push(json!({
-                    "role": "assistant",
-                    "content": Value::Null,
-                    "tool_calls": [call],
-                }));
+                builder.add_tool_call(call);
             }
         }
         M::ToolCallResult(tr) => {
-            seen_tool_results.insert(tr.tool_call_id.clone());
-            out.push(json!({
-                "role": "tool",
-                "tool_call_id": tr.tool_call_id,
-                "content": tools::history_tool_result_to_text(tr),
-            }));
+            builder.push_tool_result(&tr.tool_call_id, tools::history_tool_result_to_text(tr));
         }
         _ => {}
     }
 }
 
-fn append_input(
-    request: &api::Request,
-    out: &mut Vec<Value>,
-    seen_tool_results: &std::collections::HashSet<String>,
-) {
+fn append_input(request: &api::Request, builder: &mut MessageBuilder) {
     let Some(input) = request.input.as_ref() else {
         return;
     };
@@ -184,31 +237,13 @@ fn append_input(
     for user_input in &user_inputs.inputs {
         use api::request::input::user_inputs::user_input::Input as I;
         match user_input.input.as_ref() {
-            Some(I::UserQuery(uq)) => {
-                let already = matches!(out.last(), Some(last) if last["role"] == "user" && last["content"] == uq.query);
-                if !already {
-                    push_user(out, &uq.query);
-                }
-            }
+            Some(I::UserQuery(uq)) => builder.push_user(&uq.query),
             Some(I::ToolCallResult(tr)) => {
-                if !seen_tool_results.contains(&tr.tool_call_id) {
-                    out.push(json!({
-                        "role": "tool",
-                        "tool_call_id": tr.tool_call_id,
-                        "content": tools::input_tool_result_to_text(tr),
-                    }));
-                }
+                builder.push_tool_result(&tr.tool_call_id, tools::input_tool_result_to_text(tr));
             }
             _ => {}
         }
     }
-}
-
-fn push_user(out: &mut Vec<Value>, text: &str) {
-    if text.is_empty() {
-        return;
-    }
-    out.push(json!({"role": "user", "content": text}));
 }
 
 #[cfg(test)]

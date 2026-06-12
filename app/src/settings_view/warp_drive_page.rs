@@ -152,6 +152,14 @@ impl SettingsWidget for WarpDriveHeaderWidget {
     }
 
     fn should_render(&self, app: &AppContext) -> bool {
+        // Warp Max (Oss): Drive works locally without an account, so never show
+        // the "create an account" banner.
+        if matches!(
+            warp_core::channel::ChannelState::channel(),
+            warp_core::channel::Channel::Oss
+        ) {
+            return false;
+        }
         FeatureFlag::SkipFirebaseAnonymousUser.is_enabled()
             && AuthStateProvider::as_ref(app)
                 .get()
@@ -241,7 +249,14 @@ impl SettingsWidget for WarpDriveToggleWidget {
         app: &AppContext,
     ) -> Box<dyn Element> {
         let settings = WarpDriveSettings::as_ref(app);
-        let is_anonymous_or_logged_out = FeatureFlag::SkipFirebaseAnonymousUser.is_enabled()
+        // Warp Max (Oss): Drive is usable logged-out (local persistence), so
+        // keep the toggle enabled regardless of auth state.
+        let is_oss = matches!(
+            warp_core::channel::ChannelState::channel(),
+            warp_core::channel::Channel::Oss
+        );
+        let is_anonymous_or_logged_out = !is_oss
+            && FeatureFlag::SkipFirebaseAnonymousUser.is_enabled()
             && AuthStateProvider::as_ref(app)
                 .get()
                 .is_anonymous_or_logged_out();

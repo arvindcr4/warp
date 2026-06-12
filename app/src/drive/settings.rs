@@ -41,7 +41,14 @@ impl WarpDriveSettings {
     /// regardless of the user setting.
     pub fn is_warp_drive_enabled(app: &warpui::AppContext) -> bool {
         use warpui::SingletonEntity as _;
-        let is_anonymous_or_logged_out = FeatureFlag::SkipFirebaseAnonymousUser.is_enabled()
+        // Warp Max (Oss): Drive objects persist locally in SQLite, so Drive is
+        // usable without a Warp account. Don't gate on logged-out state.
+        let is_oss = matches!(
+            warp_core::channel::ChannelState::channel(),
+            warp_core::channel::Channel::Oss
+        );
+        let is_anonymous_or_logged_out = !is_oss
+            && FeatureFlag::SkipFirebaseAnonymousUser.is_enabled()
             && crate::auth::AuthStateProvider::as_ref(app)
                 .get()
                 .is_anonymous_or_logged_out();

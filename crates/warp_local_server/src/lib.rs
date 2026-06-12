@@ -18,7 +18,11 @@ Run commands to verify your work when useful. When the task is complete, give a 
 
 /// Runs one agent turn for a decoded request and returns the ordered
 /// `ResponseEvent`s to stream back (always `Init` … `Finished`).
-pub async fn run_turn(client: &reqwest::Client, request: api::Request) -> Vec<api::ResponseEvent> {
+pub async fn run_turn(
+    client: &reqwest::Client,
+    request: api::Request,
+    auth_header_api_key: Option<String>,
+) -> Vec<api::ResponseEvent> {
     let conversation_id = {
         let existing = history::conversation_id(&request);
         if existing.is_empty() {
@@ -30,7 +34,7 @@ pub async fn run_turn(client: &reqwest::Client, request: api::Request) -> Vec<ap
     let run_id = uuid::Uuid::new_v4().to_string();
     let init = sse::init(conversation_id, run_id);
 
-    let Some(provider) = history::resolve_provider(&request) else {
+    let Some(provider) = history::resolve_provider(&request, auth_header_api_key) else {
         return vec![
             init,
             sse::finished_error(

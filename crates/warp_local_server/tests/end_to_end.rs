@@ -89,7 +89,7 @@ async fn run_turn_streams_text_and_tool_call() {
     let client = reqwest::Client::new();
     let request = request_with_user_query(&base_url, "list the files here");
 
-    let events = run_turn(&client, request).await;
+    let events = run_turn(&client, request, None).await;
     assert_eq!(events.len(), 3, "expected Init, ClientActions, Finished");
 
     assert!(matches!(
@@ -133,7 +133,7 @@ async fn run_turn_streams_text_and_tool_call() {
 #[tokio::test]
 async fn run_turn_without_provider_emits_error_finish() {
     let client = reqwest::Client::new();
-    let events = run_turn(&client, api::Request::default()).await;
+    let events = run_turn(&client, api::Request::default(), None).await;
     assert_eq!(events.len(), 2);
     assert!(matches!(
         events[1].r#type,
