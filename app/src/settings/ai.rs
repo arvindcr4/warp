@@ -1545,10 +1545,17 @@ impl AISettings {
     }
 
     pub fn is_any_ai_enabled(&self, app: &AppContext) -> bool {
-        // Disable AI for anonymous and logged-out users.
-        let is_anonymous_or_logged_out = AuthStateProvider::as_ref(app)
-            .get()
-            .is_anonymous_or_logged_out();
+        // Warp Max (Oss) runs all AI on the user's own keys via the local
+        // backend, so AI is available even when logged out. Other channels keep
+        // the anonymous/logged-out gate.
+        let is_oss = matches!(
+            warp_core::channel::ChannelState::channel(),
+            warp_core::channel::Channel::Oss
+        );
+        let is_anonymous_or_logged_out = !is_oss
+            && AuthStateProvider::as_ref(app)
+                .get()
+                .is_anonymous_or_logged_out();
 
         *self.is_any_ai_enabled
             && !is_anonymous_or_logged_out

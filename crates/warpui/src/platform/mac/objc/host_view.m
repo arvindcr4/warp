@@ -218,6 +218,34 @@ void warp_marked_text_cleared(WarpHostView *);
     return NO;
 }
 
+// With a full-size content view, this host view covers the titlebar region and
+// would otherwise swallow clicks on the standard close/minimize/zoom buttons
+// (every mouse event is forwarded to Warp). Forward hit-testing for points over
+// those buttons to the buttons themselves so AppKit delivers the click to them
+// directly, restoring their normal behavior (and hover/press animations).
+- (NSView *)hitTest:(NSPoint)point {
+    NSWindow *window = self.window;
+    if (window) {
+        NSButton *trafficLights[] = {
+            [window standardWindowButton:NSWindowCloseButton],
+            [window standardWindowButton:NSWindowMiniaturizeButton],
+            [window standardWindowButton:NSWindowZoomButton],
+        };
+        for (int i = 0; i < 3; i++) {
+            NSButton *button = trafficLights[i];
+            if (!button || button.isHidden || !button.isEnabled) {
+                continue;
+            }
+            // `point` is in this view's superview coordinates.
+            NSPoint pointInButton = [button convertPoint:point fromView:self.superview];
+            if (NSPointInRect(pointInButton, button.bounds)) {
+                return button;
+            }
+        }
+    }
+    return [super hitTest:point];
+}
+
 - (void)mouseDown:(NSEvent *)event {
     if (self.readyForWarp) {
         BOOL eventHandled = warp_handle_view_event(self, event, NO);

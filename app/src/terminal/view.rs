@@ -10738,6 +10738,13 @@ impl TerminalView {
     }
 
     fn insert_anonymous_user_ai_sign_up_banner(&mut self, ctx: &mut ViewContext<Self>) {
+        // Warp Max: no Warp accounts — never show the anonymous-user sign-up banner.
+        if matches!(
+            warp_core::channel::ChannelState::channel(),
+            warp_core::channel::Channel::Oss
+        ) {
+            return;
+        }
         if *GeneralSettings::as_ref(ctx)
             .anonymous_user_ai_sign_up_banner_shown
             .value()

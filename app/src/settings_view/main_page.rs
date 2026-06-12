@@ -343,19 +343,9 @@ impl AccountWidget {
             ..Default::default()
         };
 
-        let user_info = appearance
-            .ui_builder()
-            .button(
-                ButtonVariant::Accent,
-                self.ui_state_handles.anonymous_user_sign_up_button.clone(),
-            )
-            .with_style(button_styles)
-            .with_text_label("Sign up".to_owned())
-            .build()
-            .on_click(move |ctx, _, _| {
-                ctx.dispatch_typed_action(MainPageAction::SignupAnonymousUser);
-            })
-            .finish();
+        // Warp Max: no Warp accounts — no "Sign up" button in the account section.
+        let _ = &button_styles;
+        let user_info = Flex::row().finish();
 
         let mut plan_info = Flex::column()
             .with_main_axis_alignment(MainAxisAlignment::SpaceEvenly)

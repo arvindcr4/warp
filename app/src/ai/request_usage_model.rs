@@ -381,6 +381,18 @@ impl AIRequestUsageModel {
     /// 7. user has BYOK enabled and has provided at least one API key
     /// Use this method as the starting point for AI availability checking.
     pub fn has_any_ai_remaining(&self, ctx: &AppContext) -> bool {
+        // Warp Max: all AI runs on the user's own keys via the local agent
+        // backend and never consumes Warp credits, so Warp's subscription /
+        // credit / request-limit gates never apply. Always report AI as
+        // available; if no endpoint is configured the local server returns a
+        // clear "configure an endpoint" message instead of a paywall.
+        if matches!(
+            warp_core::channel::ChannelState::channel(),
+            warp_core::channel::Channel::Oss
+        ) {
+            return true;
+        }
+
         let current_workspace = UserWorkspaces::as_ref(ctx).current_workspace();
 
         let has_base_plan_ai_requests = self.has_requests_remaining();

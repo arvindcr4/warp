@@ -9262,13 +9262,7 @@ impl Workspace {
             MenuItem::Separator,
         ]);
 
-        if self.auth_state.is_anonymous_or_logged_out() {
-            items.push(
-                MenuItemFields::new("Sign up")
-                    .with_on_select_action(WorkspaceAction::SignupAnonymousUser)
-                    .into_item(),
-            );
-        }
+        // Warp Max: no Warp accounts — no "Sign up" menu item.
 
         // Check if the user is on any paid plan to determine whether to show "Billing and Usage" or "Upgrade"
         let is_on_paid_plan = UserWorkspaces::as_ref(app)
@@ -9298,13 +9292,7 @@ impl Workspace {
                 .into_item(),
         );
 
-        if !self.auth_state.is_anonymous_or_logged_out() {
-            items.push(
-                MenuItemFields::new("Log out")
-                    .with_on_select_action(WorkspaceAction::LogOut)
-                    .into_item(),
-            );
-        }
+        // Warp Max: no Warp accounts — no "Log out" menu item.
         items
     }
 
