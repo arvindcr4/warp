@@ -1337,6 +1337,12 @@ fn build_custom_llm_infos(keys: &ai::api_keys::ApiKeys) -> Vec<LLMInfo> {
 
 fn custom_llm_info_from(endpoint: &CustomEndpoint, model: &CustomEndpointModel) -> LLMInfo {
     let label = model.display_label().to_owned();
+    let description = match endpoint.api_format {
+        ai::api_keys::ApiFormat::OpenAiChatCompletions => format!("Custom · {}", endpoint.name),
+        ai::api_keys::ApiFormat::AnthropicMessages => {
+            format!("Custom · {} · Anthropic", endpoint.name)
+        }
+    };
     LLMInfo {
         display_name: label.clone(),
         base_model_name: label,
@@ -1346,7 +1352,7 @@ fn custom_llm_info_from(endpoint: &CustomEndpoint, model: &CustomEndpointModel) 
             request_multiplier: 1,
             credit_multiplier: None,
         },
-        description: Some(format!("Custom · {}", endpoint.name)),
+        description: Some(description),
         disable_reason: None,
         vision_supported: true,
         spec: None,

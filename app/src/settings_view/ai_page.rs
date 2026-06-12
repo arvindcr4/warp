@@ -1958,20 +1958,24 @@ impl AISettingsPageView {
                 name,
                 url,
                 api_key,
+                api_format,
+                anthropic_bridge_url,
                 models,
             } => {
                 if !Self::can_use_custom_inference_controls(ctx) {
                     self.hide_custom_endpoint_modal(ctx);
                     return;
                 }
+                let draft = ::ai::api_keys::CustomEndpointDraft {
+                    name: name.clone(),
+                    url: url.clone(),
+                    api_key: api_key.clone(),
+                    api_format: *api_format,
+                    anthropic_bridge_url: anthropic_bridge_url.clone(),
+                    models: models.clone(),
+                };
                 ApiKeyManager::handle(ctx).update(ctx, |manager, ctx| {
-                    manager.add_custom_endpoint(
-                        name.clone(),
-                        url.clone(),
-                        api_key.clone(),
-                        models.clone(),
-                        ctx,
-                    );
+                    manager.add_custom_endpoint(draft, ctx);
                 });
                 self.hide_custom_endpoint_modal(ctx);
 
@@ -1989,21 +1993,24 @@ impl AISettingsPageView {
                 name,
                 url,
                 api_key,
+                api_format,
+                anthropic_bridge_url,
                 models,
             } => {
                 if !Self::can_use_custom_inference_controls(ctx) {
                     self.hide_custom_endpoint_modal(ctx);
                     return;
                 }
+                let draft = ::ai::api_keys::CustomEndpointDraft {
+                    name: name.clone(),
+                    url: url.clone(),
+                    api_key: api_key.clone(),
+                    api_format: *api_format,
+                    anthropic_bridge_url: anthropic_bridge_url.clone(),
+                    models: models.clone(),
+                };
                 ApiKeyManager::handle(ctx).update(ctx, |manager, ctx| {
-                    manager.save_custom_endpoint(
-                        *index,
-                        name.clone(),
-                        url.clone(),
-                        api_key.clone(),
-                        models.clone(),
-                        ctx,
-                    );
+                    manager.save_custom_endpoint(*index, draft, ctx);
                 });
                 self.hide_custom_endpoint_modal(ctx);
 
@@ -7662,7 +7669,7 @@ impl ApiKeysWidget {
         let appearance = Appearance::as_ref(app);
         let text_fragments = vec![
             FormattedTextFragment::plain_text(
-                "Use your own API keys from model providers for Warp Agent. You can also add custom endpoints to use third-party models. Custom endpoints must support the OpenAI-compatible Chat Completions API. API keys are stored only on your device, never on Warp's servers. They're used to make requests to your chosen model provider. Using auto models or models from providers you have not provided API keys for will consume Warp credits. ",
+                "Use your own API keys from model providers for Warp Agent. You can also add custom endpoints to use third-party models. Custom endpoints must support the OpenAI-compatible Chat Completions API; Anthropic-compatible Messages endpoints (e.g. a MiniMax Token Plan) are supported via a self-hosted anthropic-bridge. API keys are stored only on your device, never on Warp's servers. They're used to make requests to your chosen model provider. Using auto models or models from providers you have not provided API keys for will consume Warp credits. ",
             ),
             FormattedTextFragment::hyperlink("Learn more", CUSTOM_INFERENCE_LEARN_MORE_URL),
         ];

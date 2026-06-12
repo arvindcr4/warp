@@ -61,6 +61,8 @@ fn endpoint_with_keys(
         name: name.into(),
         url: url.into(),
         api_key: api_key.into(),
+        api_format: ApiFormat::default(),
+        anthropic_bridge_url: String::new(),
         models: models
             .iter()
             .map(|(n, a, cfg)| CustomEndpointModel {
@@ -124,6 +126,17 @@ fn serde_ignores_unknown_fields() {
     let keys: ApiKeys = serde_json::from_str(json).unwrap();
     assert_eq!(keys.openai, Some("sk-x".into()));
     assert!(keys.custom_endpoints.is_empty());
+}
+
+#[test]
+fn serde_defaults_api_format_for_legacy_endpoints() {
+    // Endpoints persisted before the api_format/anthropic_bridge_url fields
+    // existed must deserialize as OpenAI-format with no bridge.
+    let json = r#"{"custom_endpoints":[{"name":"ep","url":"https://a.io/v1","api_key":"k","models":[{"name":"m","alias":null,"config_key":"cfg-0"}]}]}"#;
+    let keys: ApiKeys = serde_json::from_str(json).unwrap();
+    let ep = &keys.custom_endpoints[0];
+    assert_eq!(ep.api_format, ApiFormat::OpenAiChatCompletions);
+    assert!(ep.anthropic_bridge_url.is_empty());
 }
 
 // ── has_any_key ─────────────────────────────────────────────────
@@ -428,4 +441,67 @@ fn api_keys_for_request_includes_expired_grok_token() {
     let mgr = make_manager_with_grok(ApiKeys::default(), Some(grok_tokens("grok-abc", Some(0))));
     let result = mgr.api_keys_for_request(true, false).unwrap();
     assert_eq!(result.grok_oauth_access_token, "grok-abc");
+}
+
+// ── request_base_url ────────────────────────────────────────────
+
+#[test]
+fn request_base_url_openai_passthrough() {
+    let ep = endpoint("ep", "https://a.io/v1", "k", &[("m", None)]);
+    assert_eq!(ep.request_base_url(), "https://a.io/v1");
+}
+
+#[test]
+fn request_base_url_anthropic_without_bridge_falls_back_to_raw_url() {
+    let mut ep = endpoint(
+        "ep",
+        "https://api.minimax.io/anthropic",
+        "k",
+        &[("m", None)],
+    );
+    ep.api_format = ApiFormat::AnthropicMessages;
+    assert_eq!(ep.request_base_url(), "https://api.minimax.io/anthropic");
+}
+
+#[test]
+fn request_base_url_anthropic_with_bridge_encodes_target() {
+    use base64::Engine as _;
+
+    let mut ep = endpoint(
+        "ep",
+        "https://api.minimax.io/anthropic",
+        "k",
+        &[("m", None)],
+    );
+    ep.api_format = ApiFormat::AnthropicMessages;
+    ep.anthropic_bridge_url = "https://bridge.example.com/".into();
+
+    let url = ep.request_base_url();
+    let encoded = url
+        .strip_prefix("https://bridge.example.com/a/")
+        .expect("bridged URL should start with the bridge base and /a/");
+    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(encoded)
+        .unwrap();
+    assert_eq!(decoded, b"https://api.minimax.io/anthropic");
+}
+
+#[test]
+fn custom_model_providers_use_bridged_base_url() {
+    let mut ep = endpoint(
+        "ep",
+        "https://api.minimax.io/anthropic",
+        "k",
+        &[("m", None)],
+    );
+    ep.api_format = ApiFormat::AnthropicMessages;
+    ep.anthropic_bridge_url = "https://bridge.example.com".into();
+    let expected = ep.request_base_url();
+
+    let manager = make_manager(ApiKeys {
+        custom_endpoints: vec![ep],
+        ..Default::default()
+    });
+    let providers = manager.custom_model_providers_for_request(true).unwrap();
+    assert_eq!(providers.providers[0].base_url, expected);
 }

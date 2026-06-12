@@ -151,6 +151,7 @@ fn endpoint(
         url: url.into(),
         api_key: api_key.into(),
         models,
+        ..Default::default()
     }
 }
 
@@ -384,14 +385,17 @@ fn reconcile_preserves_custom_models_saved_on_execution_profile() {
         let custom_model_id = LLMId::from("custom-model-config-key");
         ApiKeyManager::handle(&app).update(&mut app, |api_key_manager, ctx| {
             api_key_manager.add_custom_endpoint(
-                "local".to_string(),
-                "https://example.com/v1".to_string(),
-                "test-key".to_string(),
-                vec![(
-                    "custom-model".to_string(),
-                    Some("Custom Model".to_string()),
-                    Some(custom_model_id.to_string()),
-                )],
+                ::ai::api_keys::CustomEndpointDraft {
+                    name: "local".to_string(),
+                    url: "https://example.com/v1".to_string(),
+                    api_key: "test-key".to_string(),
+                    models: vec![(
+                        "custom-model".to_string(),
+                        Some("Custom Model".to_string()),
+                        Some(custom_model_id.to_string()),
+                    )],
+                    ..Default::default()
+                },
                 ctx,
             );
         });

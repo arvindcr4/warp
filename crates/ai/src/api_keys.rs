@@ -1,5 +1,6 @@
 use std::time::{Duration, SystemTime};
 
+use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use warp_multi_agent_api as api;
@@ -41,7 +42,93 @@ pub struct CustomEndpoint {
     pub name: String,
     pub url: String,
     pub api_key: String,
+    /// Wire protocol the endpoint speaks. Warp's backend only issues
+    /// OpenAI-compatible Chat Completions requests to custom endpoints, so
+    /// [`ApiFormat::AnthropicMessages`] endpoints are routed through a
+    /// self-hosted translation bridge (see `anthropic_bridge_url`).
+    pub api_format: ApiFormat,
+    /// Base URL of a self-hosted OpenAI⇄Anthropic translation bridge (the
+    /// `anthropic-bridge` binary in this repo), used when `api_format` is
+    /// [`ApiFormat::AnthropicMessages`]. Empty when unset.
+    pub anthropic_bridge_url: String,
     pub models: Vec<CustomEndpointModel>,
+}
+
+/// The wire protocol a custom endpoint speaks.
+///
+/// Warp's backend speaks the OpenAI-compatible Chat Completions API to custom
+/// endpoints. Anthropic-compatible (Messages API) endpoints, such as a MiniMax
+/// Token Plan's `https://api.minimax.io/anthropic`, are supported by routing
+/// requests through a translation bridge that exposes an OpenAI-compatible
+/// surface and forwards translated requests to the real endpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ApiFormat {
+    #[default]
+    OpenAiChatCompletions,
+    AnthropicMessages,
+}
+
+impl CustomEndpoint {
+    /// The base URL shipped on the request wire for this endpoint.
+    ///
+    /// OpenAI-format endpoints are used as-is. Anthropic-format endpoints are
+    /// routed through the configured translation bridge, with the real target
+    /// URL smuggled in the path as URL-safe base64 (`{bridge}/a/{b64(url)}`);
+    /// the bridge decodes the target and forwards translated requests to it.
+    /// Falls back to the raw URL when no bridge is configured, in which case
+    /// the request only works if the endpoint also accepts OpenAI-format
+    /// requests at that URL.
+    pub fn request_base_url(&self) -> String {
+        match self.api_format {
+            ApiFormat::OpenAiChatCompletions => self.url.clone(),
+            ApiFormat::AnthropicMessages => {
+                let bridge = self.anthropic_bridge_url.trim().trim_end_matches('/');
+                if bridge.is_empty() {
+                    return self.url.clone();
+                }
+                let encoded =
+                    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(self.url.trim());
+                format!("{bridge}/a/{encoded}")
+            }
+        }
+    }
+}
+
+/// User-entered fields for creating or updating a [`CustomEndpoint`].
+///
+/// `models` entries are `(name, alias, config_key)`; a missing or empty
+/// `config_key` gets a fresh UUIDv4 assigned on conversion.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CustomEndpointDraft {
+    pub name: String,
+    pub url: String,
+    pub api_key: String,
+    pub api_format: ApiFormat,
+    pub anthropic_bridge_url: String,
+    pub models: Vec<(String, Option<String>, Option<String>)>,
+}
+
+impl From<CustomEndpointDraft> for CustomEndpoint {
+    fn from(draft: CustomEndpointDraft) -> Self {
+        CustomEndpoint {
+            name: draft.name,
+            url: draft.url,
+            api_key: draft.api_key,
+            api_format: draft.api_format,
+            anthropic_bridge_url: draft.anthropic_bridge_url,
+            models: draft
+                .models
+                .into_iter()
+                .map(|(name, alias, config_key)| CustomEndpointModel {
+                    name,
+                    alias,
+                    config_key: config_key
+                        .filter(|k| !k.is_empty())
+                        .unwrap_or_else(|| Uuid::new_v4().to_string()),
+                })
+                .collect(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -234,27 +321,10 @@ impl ApiKeyManager {
 
     pub fn add_custom_endpoint(
         &mut self,
-        name: String,
-        url: String,
-        api_key: String,
-        models: Vec<(String, Option<String>, Option<String>)>,
+        draft: CustomEndpointDraft,
         ctx: &mut ModelContext<Self>,
     ) {
-        self.keys.custom_endpoints.push(CustomEndpoint {
-            name,
-            url,
-            api_key,
-            models: models
-                .into_iter()
-                .map(|(name, alias, config_key)| CustomEndpointModel {
-                    name,
-                    alias,
-                    config_key: config_key
-                        .filter(|k| !k.is_empty())
-                        .unwrap_or_else(|| Uuid::new_v4().to_string()),
-                })
-                .collect(),
-        });
+        self.keys.custom_endpoints.push(draft.into());
         ctx.emit(ApiKeyManagerEvent::KeysUpdated);
         self.write_keys_to_secure_storage(ctx);
     }
@@ -262,30 +332,13 @@ impl ApiKeyManager {
     pub fn save_custom_endpoint(
         &mut self,
         index: usize,
-        name: String,
-        url: String,
-        api_key: String,
-        models: Vec<(String, Option<String>, Option<String>)>,
+        draft: CustomEndpointDraft,
         ctx: &mut ModelContext<Self>,
     ) {
         if index >= self.keys.custom_endpoints.len() {
             return;
         }
-        self.keys.custom_endpoints[index] = CustomEndpoint {
-            name,
-            url,
-            api_key,
-            models: models
-                .into_iter()
-                .map(|(name, alias, config_key)| CustomEndpointModel {
-                    name,
-                    alias,
-                    config_key: config_key
-                        .filter(|k| !k.is_empty())
-                        .unwrap_or_else(|| Uuid::new_v4().to_string()),
-                })
-                .collect(),
-        };
+        self.keys.custom_endpoints[index] = draft.into();
         ctx.emit(ApiKeyManagerEvent::KeysUpdated);
         self.write_keys_to_secure_storage(ctx);
     }
@@ -356,7 +409,7 @@ impl ApiKeyManager {
             .filter(|endpoint| !endpoint.url.trim().is_empty() && !endpoint.api_key.is_empty())
             .map(
                 |endpoint| api::request::settings::custom_model_providers::CustomModelProvider {
-                    base_url: endpoint.url.clone(),
+                    base_url: endpoint.request_base_url(),
                     api_key: endpoint.api_key.clone(),
                     models: endpoint
                         .models

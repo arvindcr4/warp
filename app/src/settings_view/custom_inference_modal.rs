@@ -1,6 +1,10 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-use ::ai::api_keys::CustomEndpoint;
+use ::ai::api_keys::{ApiFormat, CustomEndpoint};
+use ::ai::minimax::{
+    minimax_url, switch_minimax_url_format, MinimaxRegion, MINIMAX_DEFAULT_MODELS,
+    MINIMAX_ENDPOINT_NAME,
+};
 use url::Url;
 use warp_editor::editor::NavigationKey;
 use warpui::elements::{
@@ -37,6 +41,8 @@ pub enum CustomEndpointModalEvent {
         name: String,
         url: String,
         api_key: String,
+        api_format: ApiFormat,
+        anthropic_bridge_url: String,
         models: Vec<(String, Option<String>, Option<String>)>,
     },
     SaveEndpoint {
@@ -44,6 +50,8 @@ pub enum CustomEndpointModalEvent {
         name: String,
         url: String,
         api_key: String,
+        api_format: ApiFormat,
+        anthropic_bridge_url: String,
         models: Vec<(String, Option<String>, Option<String>)>,
     },
     RemoveEndpoint {
@@ -58,6 +66,8 @@ pub enum CustomEndpointModalAction {
     AddModel,
     RemoveModel(usize),
     RemoveEndpoint,
+    SetApiFormat(ApiFormat),
+    ApplyMinimaxPreset(MinimaxRegion),
 }
 
 struct ModelRow {
@@ -71,13 +81,20 @@ pub struct CustomEndpointModal {
     endpoint_name_editor: ViewHandle<EditorView>,
     endpoint_url_editor: ViewHandle<EditorView>,
     api_key_editor: ViewHandle<EditorView>,
+    bridge_url_editor: ViewHandle<EditorView>,
+    api_format: ApiFormat,
     model_rows: Vec<ModelRow>,
     cancel_button_mouse_state: MouseStateHandle,
     save_button_mouse_state: MouseStateHandle,
     add_model_button_mouse_state: MouseStateHandle,
+    openai_format_mouse_state: MouseStateHandle,
+    anthropic_format_mouse_state: MouseStateHandle,
+    minimax_global_preset_mouse_state: MouseStateHandle,
+    minimax_china_preset_mouse_state: MouseStateHandle,
     remove_endpoint_button: ViewHandle<ActionButton>,
     editing_index: Option<usize>,
     url_has_error: bool,
+    bridge_url_has_error: bool,
 }
 
 impl CustomEndpointModal {
@@ -150,6 +167,26 @@ impl CustomEndpointModal {
             editor
         });
 
+        let bridge_url_text_colors = text_colors.clone();
+        let bridge_url_editor = ctx.add_typed_action_view(move |ctx| {
+            let options = SingleLineEditorOptions {
+                text: TextOptions {
+                    font_family_override: Some(font_family),
+                    text_colors_override: Some(bridge_url_text_colors.clone()),
+                    ..Default::default()
+                },
+                propagate_and_no_op_vertical_navigation_keys:
+                    PropagateAndNoOpNavigationKeys::Always,
+                ..Default::default()
+            };
+            let mut editor = EditorView::single_line(options, ctx);
+            editor.set_placeholder_text("e.g., https://bridge.example.com", ctx);
+            if let Some(ep) = endpoint {
+                editor.set_buffer_text(&ep.anthropic_bridge_url, ctx);
+            }
+            editor
+        });
+
         let mut model_rows = Vec::new();
         if let Some(ep) = endpoint {
             for model in &ep.models {
@@ -186,6 +223,12 @@ impl CustomEndpointModal {
         ctx.subscribe_to_view(&api_key_editor, |me, _, event, ctx| {
             me.handle_api_key_event(event, ctx);
         });
+        ctx.subscribe_to_view(&bridge_url_editor, |me, _, event, ctx| {
+            me.handle_bridge_url_event(event, ctx);
+        });
+        let initial_bridge_url = bridge_url_editor.as_ref(ctx).buffer_text(ctx);
+        let bridge_url_has_error =
+            !initial_bridge_url.trim().is_empty() && validate_url(&initial_bridge_url).is_err();
         for row in &model_rows {
             let name_editor = row.name_editor.clone();
             ctx.subscribe_to_view(&name_editor, |me, editor, event, ctx| {
@@ -208,13 +251,20 @@ impl CustomEndpointModal {
             endpoint_name_editor,
             endpoint_url_editor,
             api_key_editor,
+            bridge_url_editor,
+            api_format: endpoint.map(|ep| ep.api_format).unwrap_or_default(),
             model_rows,
             cancel_button_mouse_state: Default::default(),
             save_button_mouse_state: Default::default(),
             add_model_button_mouse_state: Default::default(),
+            openai_format_mouse_state: Default::default(),
+            anthropic_format_mouse_state: Default::default(),
+            minimax_global_preset_mouse_state: Default::default(),
+            minimax_china_preset_mouse_state: Default::default(),
             remove_endpoint_button,
             editing_index,
             url_has_error,
+            bridge_url_has_error,
         }
     }
 
@@ -281,6 +331,7 @@ impl CustomEndpointModal {
         ctx: &mut ViewContext<Self>,
     ) {
         self.editing_index = editing_index;
+        self.api_format = endpoint.map(|e| e.api_format).unwrap_or_default();
         self.endpoint_name_editor.update(ctx, |editor, ctx| {
             editor.set_buffer_text(endpoint.map(|e| e.name.as_str()).unwrap_or(""), ctx);
         });
@@ -292,6 +343,17 @@ impl CustomEndpointModal {
         self.api_key_editor.update(ctx, |editor, ctx| {
             editor.set_buffer_text(endpoint.map(|e| e.api_key.as_str()).unwrap_or(""), ctx);
         });
+        self.bridge_url_editor.update(ctx, |editor, ctx| {
+            editor.set_buffer_text(
+                endpoint
+                    .map(|e| e.anthropic_bridge_url.as_str())
+                    .unwrap_or(""),
+                ctx,
+            );
+        });
+        let bridge_url = self.bridge_url_editor.as_ref(ctx).buffer_text(ctx);
+        self.bridge_url_has_error =
+            !bridge_url.trim().is_empty() && validate_url(&bridge_url).is_err();
         // Rebuild model rows
         // Old model row editors will be dropped with the modal body
         self.model_rows.clear();
@@ -346,6 +408,10 @@ impl CustomEndpointModal {
         self.api_key_editor.update(ctx, |editor, ctx| {
             editor.clear_buffer_and_reset_undo_stack(ctx);
         });
+        self.bridge_url_editor.update(ctx, |editor, ctx| {
+            editor.clear_buffer_and_reset_undo_stack(ctx);
+        });
+        self.api_format = ApiFormat::default();
         for row in &self.model_rows {
             row.name_editor.update(ctx, |editor, ctx| {
                 editor.clear_buffer_and_reset_undo_stack(ctx);
@@ -358,12 +424,23 @@ impl CustomEndpointModal {
 
     fn save(&mut self, ctx: &mut ViewContext<Self>) {
         self.validate_url_field(ctx);
+        self.validate_bridge_url_field(ctx);
         if !self.is_valid(ctx) {
             return;
         }
         let name = self.endpoint_name_editor.as_ref(ctx).buffer_text(ctx);
         let url = self.endpoint_url_editor.as_ref(ctx).buffer_text(ctx);
         let api_key = self.api_key_editor.as_ref(ctx).buffer_text(ctx);
+        let api_format = self.api_format;
+        let anthropic_bridge_url = match api_format {
+            ApiFormat::OpenAiChatCompletions => String::new(),
+            ApiFormat::AnthropicMessages => self
+                .bridge_url_editor
+                .as_ref(ctx)
+                .buffer_text(ctx)
+                .trim()
+                .to_string(),
+        };
         let models: Vec<(String, Option<String>, Option<String>)> = self
             .model_rows
             .iter()
@@ -385,6 +462,8 @@ impl CustomEndpointModal {
                 name,
                 url,
                 api_key,
+                api_format,
+                anthropic_bridge_url,
                 models,
             });
         } else {
@@ -392,6 +471,8 @@ impl CustomEndpointModal {
                 name,
                 url,
                 api_key,
+                api_format,
+                anthropic_bridge_url,
                 models,
             });
         }
@@ -425,6 +506,62 @@ impl CustomEndpointModal {
         }
     }
 
+    fn set_api_format(&mut self, api_format: ApiFormat, ctx: &mut ViewContext<Self>) {
+        if self.api_format == api_format {
+            return;
+        }
+        self.api_format = api_format;
+        // Keep the URL in sync for the well-known MiniMax endpoints, which
+        // expose the same key over both wire formats at different paths.
+        let url = self.endpoint_url_editor.as_ref(ctx).buffer_text(ctx);
+        if let Some(new_url) = switch_minimax_url_format(&url, api_format) {
+            self.endpoint_url_editor.update(ctx, |editor, ctx| {
+                editor.set_buffer_text(new_url, ctx);
+            });
+            self.url_has_error = false;
+        }
+        ctx.notify();
+    }
+
+    fn apply_minimax_preset(&mut self, region: MinimaxRegion, ctx: &mut ViewContext<Self>) {
+        self.endpoint_name_editor.update(ctx, |editor, ctx| {
+            editor.set_buffer_text(MINIMAX_ENDPOINT_NAME, ctx);
+        });
+        self.endpoint_url_editor.update(ctx, |editor, ctx| {
+            editor.set_buffer_text(minimax_url(region, self.api_format), ctx);
+        });
+        self.url_has_error = false;
+
+        // Replace the model rows with the Token Plan's default models,
+        // preserving nothing: the preset is a fresh starting point.
+        self.model_rows.clear();
+        let font_family = Appearance::as_ref(ctx).ui_font_family();
+        let text_colors = crate::settings_view::editor_text_colors(Appearance::as_ref(ctx));
+        for (model, alias) in MINIMAX_DEFAULT_MODELS {
+            self.model_rows.push(Self::create_model_row(
+                Some(model),
+                Some(alias),
+                None,
+                font_family,
+                &text_colors,
+                ctx,
+            ));
+        }
+        for row in &self.model_rows {
+            let name_editor = row.name_editor.clone();
+            ctx.subscribe_to_view(&name_editor, |me, editor, event, ctx| {
+                me.handle_model_editor_event(&editor, event, ctx);
+            });
+            let alias_editor = row.alias_editor.clone();
+            ctx.subscribe_to_view(&alias_editor, |me, editor, event, ctx| {
+                me.handle_model_editor_event(&editor, event, ctx);
+            });
+        }
+
+        ctx.focus(&self.api_key_editor);
+        ctx.notify();
+    }
+
     fn is_valid(&self, app: &AppContext) -> bool {
         let name = self.endpoint_name_editor.as_ref(app).buffer_text(app);
         let url = self.endpoint_url_editor.as_ref(app).buffer_text(app);
@@ -436,19 +573,34 @@ impl CustomEndpointModal {
                 .trim()
                 .is_empty()
         });
-        is_endpoint_form_valid(&name, &url, &api_key, has_models)
+        let bridge_url_ok = match self.api_format {
+            ApiFormat::OpenAiChatCompletions => true,
+            ApiFormat::AnthropicMessages => {
+                let bridge_url = self.bridge_url_editor.as_ref(app).buffer_text(app);
+                bridge_url.trim().is_empty() || validate_url(&bridge_url).is_ok()
+            }
+        };
+        is_endpoint_form_valid(&name, &url, &api_key, has_models) && bridge_url_ok
     }
 
-    fn focus_next_editor(&self, current: &ViewHandle<EditorView>, ctx: &mut ViewContext<Self>) {
-        let mut editors: Vec<&ViewHandle<EditorView>> = vec![
+    fn editor_chain(&self) -> Vec<&ViewHandle<EditorView>> {
+        let mut editors = vec![
             &self.endpoint_name_editor,
             &self.endpoint_url_editor,
             &self.api_key_editor,
         ];
+        if self.api_format == ApiFormat::AnthropicMessages {
+            editors.push(&self.bridge_url_editor);
+        }
         for row in &self.model_rows {
             editors.push(&row.name_editor);
             editors.push(&row.alias_editor);
         }
+        editors
+    }
+
+    fn focus_next_editor(&self, current: &ViewHandle<EditorView>, ctx: &mut ViewContext<Self>) {
+        let editors = self.editor_chain();
         if let Some(pos) = editors.iter().position(|e| *e == current) {
             let next = (pos + 1) % editors.len();
             ctx.focus(editors[next]);
@@ -456,15 +608,7 @@ impl CustomEndpointModal {
     }
 
     fn focus_prev_editor(&self, current: &ViewHandle<EditorView>, ctx: &mut ViewContext<Self>) {
-        let mut editors: Vec<&ViewHandle<EditorView>> = vec![
-            &self.endpoint_name_editor,
-            &self.endpoint_url_editor,
-            &self.api_key_editor,
-        ];
-        for row in &self.model_rows {
-            editors.push(&row.name_editor);
-            editors.push(&row.alias_editor);
-        }
+        let editors = self.editor_chain();
         if let Some(pos) = editors.iter().position(|e| *e == current) {
             let prev = if pos == 0 { editors.len() - 1 } else { pos - 1 };
             ctx.focus(editors[prev]);
@@ -529,26 +673,59 @@ impl CustomEndpointModal {
         changed
     }
 
+    fn validate_bridge_url_field(&mut self, ctx: &mut ViewContext<Self>) -> bool {
+        let url = self.bridge_url_editor.as_ref(ctx).buffer_text(ctx);
+        let had_error = self.bridge_url_has_error;
+        self.bridge_url_has_error = !url.trim().is_empty() && validate_url(&url).is_err();
+        let changed = self.bridge_url_has_error != had_error;
+        if changed {
+            ctx.notify();
+        }
+        changed
+    }
+
     fn handle_api_key_event(&mut self, event: &EditorEvent, ctx: &mut ViewContext<Self>) {
         match event {
             EditorEvent::Navigate(NavigationKey::Tab) => {
-                if let Some(first_row) = self.model_rows.first() {
-                    ctx.focus(&first_row.name_editor);
-                }
+                self.focus_next_editor(&self.api_key_editor, ctx);
             }
             EditorEvent::Navigate(NavigationKey::ShiftTab) => {
                 ctx.focus(&self.endpoint_url_editor);
             }
             EditorEvent::Enter => {
-                if let Some(first_row) = self.model_rows.first() {
-                    ctx.focus(&first_row.name_editor);
-                }
+                self.focus_next_editor(&self.api_key_editor, ctx);
             }
             EditorEvent::Escape => {
                 self.cancel(ctx);
             }
             EditorEvent::Edited(_) => {
                 ctx.notify();
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_bridge_url_event(&mut self, event: &EditorEvent, ctx: &mut ViewContext<Self>) {
+        match event {
+            EditorEvent::Navigate(NavigationKey::Tab) => {
+                self.validate_bridge_url_field(ctx);
+                self.focus_next_editor(&self.bridge_url_editor, ctx);
+            }
+            EditorEvent::Navigate(NavigationKey::ShiftTab) => {
+                self.validate_bridge_url_field(ctx);
+                ctx.focus(&self.api_key_editor);
+            }
+            EditorEvent::Enter => {
+                self.validate_bridge_url_field(ctx);
+                self.focus_next_editor(&self.bridge_url_editor, ctx);
+            }
+            EditorEvent::Escape => {
+                self.cancel(ctx);
+            }
+            EditorEvent::Edited(_) => {
+                if !self.validate_bridge_url_field(ctx) {
+                    ctx.notify();
+                }
             }
             _ => {}
         }
@@ -630,6 +807,62 @@ impl View for CustomEndpointModal {
             .finish(),
         );
 
+        // Quick-setup presets (add mode only): prefill the form for a MiniMax
+        // Token Plan subscription so the user only has to paste their key.
+        if !is_editing {
+            column.add_child(
+                Container::new(label("Quick setup"))
+                    .with_margin_bottom(4.)
+                    .finish(),
+            );
+            let preset_button_style = UiComponentStyles {
+                font_size: Some(14.),
+                padding: Some(Coords::uniform(6.).left(8.).right(8.)),
+                ..Default::default()
+            };
+            let presets_row = Flex::row()
+                .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                .with_spacing(8.)
+                .with_child(
+                    appearance
+                        .ui_builder()
+                        .button(
+                            ButtonVariant::Secondary,
+                            self.minimax_global_preset_mouse_state.clone(),
+                        )
+                        .with_text_label("MiniMax Token Plan".to_string())
+                        .with_style(preset_button_style)
+                        .build()
+                        .on_click(move |ctx, _, _| {
+                            ctx.dispatch_typed_action(
+                                CustomEndpointModalAction::ApplyMinimaxPreset(
+                                    MinimaxRegion::Global,
+                                ),
+                            );
+                        })
+                        .finish(),
+                )
+                .with_child(
+                    appearance
+                        .ui_builder()
+                        .button(
+                            ButtonVariant::Secondary,
+                            self.minimax_china_preset_mouse_state.clone(),
+                        )
+                        .with_text_label("MiniMax Token Plan (China)".to_string())
+                        .with_style(preset_button_style)
+                        .build()
+                        .on_click(move |ctx, _, _| {
+                            ctx.dispatch_typed_action(
+                                CustomEndpointModalAction::ApplyMinimaxPreset(MinimaxRegion::China),
+                            );
+                        })
+                        .finish(),
+                )
+                .finish();
+            column.add_child(Container::new(presets_row).with_margin_bottom(16.).finish());
+        }
+
         // Endpoint name
         column.add_child(
             Container::new(label("Endpoint name"))
@@ -674,6 +907,108 @@ impl View for CustomEndpointModal {
             .with_margin_bottom(16.)
             .finish(),
         );
+
+        // API format
+        column.add_child(
+            Container::new(label("API format"))
+                .with_margin_bottom(4.)
+                .finish(),
+        );
+        let format_button_style = UiComponentStyles {
+            font_size: Some(14.),
+            padding: Some(Coords::uniform(6.).left(8.).right(8.)),
+            ..Default::default()
+        };
+        let openai_selected = self.api_format == ApiFormat::OpenAiChatCompletions;
+        let format_row = Flex::row()
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_spacing(8.)
+            .with_child(
+                appearance
+                    .ui_builder()
+                    .button(
+                        if openai_selected {
+                            ButtonVariant::Accent
+                        } else {
+                            ButtonVariant::Secondary
+                        },
+                        self.openai_format_mouse_state.clone(),
+                    )
+                    .with_text_label("OpenAI Chat Completions".to_string())
+                    .with_style(format_button_style)
+                    .build()
+                    .on_click(move |ctx, _, _| {
+                        ctx.dispatch_typed_action(CustomEndpointModalAction::SetApiFormat(
+                            ApiFormat::OpenAiChatCompletions,
+                        ));
+                    })
+                    .finish(),
+            )
+            .with_child(
+                appearance
+                    .ui_builder()
+                    .button(
+                        if openai_selected {
+                            ButtonVariant::Secondary
+                        } else {
+                            ButtonVariant::Accent
+                        },
+                        self.anthropic_format_mouse_state.clone(),
+                    )
+                    .with_text_label("Anthropic Messages".to_string())
+                    .with_style(format_button_style)
+                    .build()
+                    .on_click(move |ctx, _, _| {
+                        ctx.dispatch_typed_action(CustomEndpointModalAction::SetApiFormat(
+                            ApiFormat::AnthropicMessages,
+                        ));
+                    })
+                    .finish(),
+            )
+            .finish();
+        column.add_child(Container::new(format_row).with_margin_bottom(16.).finish());
+
+        // Bridge URL (Anthropic format only)
+        if self.api_format == ApiFormat::AnthropicMessages {
+            column.add_child(
+                Container::new(label("Anthropic bridge URL (optional)"))
+                    .with_margin_bottom(4.)
+                    .finish(),
+            );
+            let bridge_border_fill = if self.bridge_url_has_error {
+                theme.ui_error_color().into()
+            } else {
+                theme.outline()
+            };
+            column.add_child(
+                Container::new(
+                    appearance
+                        .ui_builder()
+                        .text_input(self.bridge_url_editor.clone())
+                        .with_style(input_style)
+                        .build()
+                        .finish(),
+                )
+                .with_border(Border::all(1.).with_border_fill(bridge_border_fill))
+                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)))
+                .with_margin_bottom(4.)
+                .finish(),
+            );
+            column.add_child(
+                Container::new(
+                    Text::new(
+                        "Warp's backend speaks the OpenAI Chat Completions API to custom endpoints. Requests to Anthropic-format endpoints are routed through your self-hosted anthropic-bridge, which must be reachable over HTTPS. If left empty, the endpoint URL is used directly and must also accept OpenAI-format requests.",
+                        appearance.ui_font_family(),
+                        LABEL_FONT_SIZE,
+                    )
+                    .with_color(theme.nonactive_ui_text_color().into())
+                    .soft_wrap(true)
+                    .finish(),
+                )
+                .with_margin_bottom(16.)
+                .finish(),
+            );
+        }
 
         // API key
         column.add_child(
@@ -939,6 +1274,12 @@ impl TypedActionView for CustomEndpointModal {
                 if let Some(index) = self.editing_index {
                     ctx.emit(CustomEndpointModalEvent::RemoveEndpoint { index });
                 }
+            }
+            CustomEndpointModalAction::SetApiFormat(api_format) => {
+                self.set_api_format(*api_format, ctx);
+            }
+            CustomEndpointModalAction::ApplyMinimaxPreset(region) => {
+                self.apply_minimax_preset(*region, ctx);
             }
         }
     }
