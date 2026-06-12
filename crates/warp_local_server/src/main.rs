@@ -11,6 +11,7 @@
 //! then re-POSTs with the results — so we only do one provider turn per request.
 
 use axum::body::{Body, Bytes};
+use axum::extract::DefaultBodyLimit;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -27,7 +28,12 @@ async fn main() -> anyhow::Result<()> {
         .route("/ai/multi-agent", post(handle_multi_agent))
         .route("/agent-mode-evals/multi-agent", post(handle_multi_agent))
         .route("/graphql/v2", post(handle_graphql))
-        .fallback(handle_fallback);
+        .fallback(handle_fallback)
+        // Agent requests carry the full conversation history plus attached
+        // context and routinely exceed axum's 2 MB default body limit; the
+        // limit rejects them mid-upload, which the client surfaces as
+        // "Warp lost connection while receiving the agent response".
+        .layer(DefaultBodyLimit::max(256 * 1024 * 1024));
 
     // An explicit bind (CLI arg or WARP_MAX_BIND) uses a single address.
     // Otherwise bind BOTH loopback families on port 8765 so the client's
@@ -104,6 +110,25 @@ async fn handle_graphql(body: Bytes) -> Response {
         json!({"data": {"featureModelChoices": null}})
     } else if query.contains("Conversations") || query.contains("conversations") {
         json!({"data": {"listAiConversations": {"conversations": []}}})
+    } else if query.contains("GetRequestLimitInfo") || query.contains("getRequestLimitInfo") {
+        json!({"data": {"user": {
+            "__typename": "UserOutput",
+            "principalType": "USER",
+            "apiKeyOwnerType": null,
+            "user": {
+                "__typename": "User",
+                "workspaces": [],
+                "requestLimitInfo": {
+                    "__typename": "RequestLimitInfo",
+                    "isUnlimited": true,
+                    "requestsUsedSinceLastRefresh": 0,
+                    "requestLimit": 999999,
+                    "nextRefreshTime": "2099-01-01T00:00:00Z",
+                    "requestLimitRefreshDuration": "MONTHLY"
+                },
+                "bonusGrants": []
+            }
+        }}})
     } else if query.contains("GetUser") || query.contains("getUser") {
         json!({"data": {"user": {
             "__typename": "UserOutput",
