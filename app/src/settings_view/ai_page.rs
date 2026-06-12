@@ -4478,8 +4478,8 @@ impl SettingsWidget for UsageWidget {
                 } else {
                     // The /upgrade page says to contact their administrator.
                     vec![
-                        FormattedTextFragment::hyperlink("Compare plans", upgrade_url),
-                        FormattedTextFragment::plain_text(" for more AI usage."),
+                        FormattedTextFragment::hyperlink("Upgrade", upgrade_url),
+                        FormattedTextFragment::plain_text(" to get more AI usage."),
                     ]
                 }
             } else {

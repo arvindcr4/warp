@@ -2532,7 +2532,7 @@ impl TeamsWidget {
                     match team.billing_metadata.customer_type {
                         CustomerType::Prosumer => "Upgrade to Turbo plan",
                         CustomerType::Turbo => "Upgrade to Lightspeed plan",
-                        _ => "Compare plans",
+                        _ => "Upgrade",
                     }
                 };
                 billing_links.add_child(

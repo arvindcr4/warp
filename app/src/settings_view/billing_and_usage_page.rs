@@ -215,11 +215,9 @@ pub struct BillingAndUsagePageView {
     purchase_addon_credits_loading: bool,
     prorated_request_limits_info_mouse_states: Vec<MouseStateHandle>,
     // ── Plan-header mouse states ─────────────────────────────────────────
-    upgrade_link: MouseStateHandle,
     anonymous_user_sign_up_button: MouseStateHandle,
     enterprise_contact_us_link: MouseStateHandle,
     stripe_billing_portal_link: MouseStateHandle,
-    admin_panel_link: MouseStateHandle,
     // ── Page-body mouse / switch states ──────────────────────────────────
     requests_highlight_index: HighlightedHyperlink,
     ubp_switch_state: SwitchStateHandle,
@@ -366,11 +364,9 @@ impl BillingAndUsagePageView {
             addon_credit_denomination_buttons: Default::default(),
             purchase_addon_credits_loading: false,
             prorated_request_limits_info_mouse_states: Default::default(),
-            upgrade_link: MouseStateHandle::default(),
             anonymous_user_sign_up_button: MouseStateHandle::default(),
             enterprise_contact_us_link: MouseStateHandle::default(),
             stripe_billing_portal_link: MouseStateHandle::default(),
-            admin_panel_link: MouseStateHandle::default(),
             requests_highlight_index: HighlightedHyperlink::default(),
             ubp_switch_state: SwitchStateHandle::default(),
             ubp_info_icon_mouse_state: MouseStateHandle::default(),
@@ -3352,37 +3348,8 @@ impl BillingAndUsagePageView {
         let mut plan_info = Flex::column()
             .with_main_axis_alignment(MainAxisAlignment::SpaceEvenly)
             .with_cross_axis_alignment(CrossAxisAlignment::End);
-        let current_user_id = auth_state.user_id().unwrap_or_default();
 
         plan_info.add_child(render_customer_type_badge(appearance, "Free".into()));
-        plan_info.add_child(
-            Container::new(
-                appearance
-                    .ui_builder()
-                    .button(ButtonVariant::Link, self.upgrade_link.clone())
-                    .with_text_and_icon_label(
-                        TextAndIcon::new(
-                            TextAndIconAlignment::IconFirst,
-                            "Compare plans",
-                            Icon::CoinsStacked.to_warpui_icon(appearance.theme().accent()),
-                            MainAxisSize::Min,
-                            MainAxisAlignment::Center,
-                            vec2f(14., 14.),
-                        )
-                        .with_inner_padding(4.),
-                    )
-                    .build()
-                    .on_click(move |ctx, _, _| {
-                        ctx.dispatch_typed_action(BillingAndUsagePageAction::Upgrade {
-                            team_uid: None,
-                            user_id: current_user_id,
-                        });
-                    })
-                    .finish(),
-            )
-            .with_margin_top(8.)
-            .finish(),
-        );
 
         Flex::row()
             .with_child(
@@ -3506,45 +3473,10 @@ impl BillingAndUsagePageView {
         .finish()
     }
 
-    fn render_non_team_user_actions(
-        &self,
-        auth_state: &AuthState,
-        appearance: &Appearance,
-    ) -> (Box<dyn Element>, Box<dyn Element>) {
-        let current_user_id = auth_state.user_id().unwrap_or_default();
-
+    fn render_non_team_user_actions(&self, appearance: &Appearance) -> Box<dyn Element> {
         let plan_badge = render_customer_type_badge(appearance, "Free".into());
 
-        let badge_element = Container::new(plan_badge).with_margin_right(16.).finish();
-
-        let compare_plans_button = Container::new(
-            appearance
-                .ui_builder()
-                .button(ButtonVariant::Link, self.admin_panel_link.clone())
-                .with_text_and_icon_label(
-                    TextAndIcon::new(
-                        TextAndIconAlignment::IconFirst,
-                        "Compare plans",
-                        Icon::CoinsStacked.to_warpui_icon(appearance.theme().accent()),
-                        MainAxisSize::Min,
-                        MainAxisAlignment::Center,
-                        vec2f(14., 14.),
-                    )
-                    .with_inner_padding(4.),
-                )
-                .build()
-                .on_click(move |ctx, _, _| {
-                    ctx.dispatch_typed_action(BillingAndUsagePageAction::Upgrade {
-                        team_uid: None,
-                        user_id: current_user_id,
-                    });
-                })
-                .finish(),
-        )
-        .with_margin_left(12.)
-        .finish();
-
-        (badge_element, compare_plans_button)
+        Container::new(plan_badge).with_margin_right(16.).finish()
     }
 
     fn render_account_info(
@@ -3588,10 +3520,8 @@ impl BillingAndUsagePageView {
                 }
             }
         } else {
-            let (plan_badge, compare_plans_button) =
-                self.render_non_team_user_actions(auth_state, appearance);
+            let plan_badge = self.render_non_team_user_actions(appearance);
             right_side.add_child(plan_badge);
-            right_side.add_child(compare_plans_button);
         }
 
         plan_header.add_child(right_side.finish());

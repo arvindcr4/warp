@@ -109,7 +109,6 @@ const AMBIENT_AGENT_TRIAL_TITLE: &str = "Cloud agent trial";
 struct PlanSectionMouseStates {
     manage_billing_link: MouseStateHandle,
     open_admin_panel_link: MouseStateHandle,
-    admin_panel_link: MouseStateHandle,
     refresh_button: MouseStateHandle,
 }
 
@@ -681,47 +680,10 @@ impl BillingAndUsagePageV2View {
                 }
             }
         } else {
-            let current_user_id = self.auth_state.user_id().unwrap_or_default();
             right_side.add_child(
                 Container::new(render_customer_type_badge(appearance, "Free".into()))
                     .with_margin_right(8.)
                     .finish(),
-            );
-            right_side.add_child(
-                Container::new(
-                    appearance
-                        .ui_builder()
-                        .button(
-                            ButtonVariant::Link,
-                            self.plan_mouse_states.admin_panel_link.clone(),
-                        )
-                        .with_text_and_icon_label(
-                            TextAndIcon::new(
-                                TextAndIconAlignment::IconFirst,
-                                "Compare plans",
-                                Icon::CoinsStacked
-                                    .to_warpui_icon(appearance.theme().active_ui_text_color()),
-                                MainAxisSize::Min,
-                                MainAxisAlignment::Center,
-                                vec2f(14., 14.),
-                            )
-                            .with_inner_padding(4.),
-                        )
-                        .with_style(UiComponentStyles {
-                            font_color: Some(appearance.theme().active_ui_text_color().into()),
-                            ..Default::default()
-                        })
-                        .build()
-                        .on_click(move |ctx, _, _| {
-                            ctx.dispatch_typed_action(BillingAndUsagePageAction::Upgrade {
-                                team_uid: None,
-                                user_id: current_user_id,
-                            });
-                        })
-                        .finish(),
-                )
-                .with_margin_left(8.)
-                .finish(),
             );
         }
 
