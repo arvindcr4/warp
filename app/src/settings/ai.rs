@@ -1692,6 +1692,14 @@ impl AISettings {
     }
 
     pub fn is_orchestration_enabled(&self, app: &warpui::AppContext) -> bool {
+        // Warp Max (Oss) is a single local agent backend with no cloud durable
+        // runs or multi-agent orchestration, so keep orchestration off.
+        if matches!(
+            warp_core::channel::ChannelState::channel(),
+            warp_core::channel::Channel::Oss
+        ) {
+            return false;
+        }
         self.is_any_ai_enabled(app)
     }
 

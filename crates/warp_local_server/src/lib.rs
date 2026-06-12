@@ -52,9 +52,22 @@ pub async fn run_turn(client: &reqwest::Client, request: api::Request) -> Vec<ap
     messages.extend(history::reconstruct_messages(&request));
     let task_id = history::target_task_id(&request);
 
+    if std::env::var("WARP_MAX_DEBUG").is_ok() {
+        eprintln!(
+            "warp-max-server: turn task_id={} base_url={} model={} history_msgs={}",
+            task_id,
+            provider.base_url,
+            provider.model,
+            messages.len()
+        );
+    }
+
     let turn = match provider::call(client, &provider, messages, tools::tool_schemas()).await {
         Ok(turn) => turn,
-        Err(e) => return vec![init, sse::finished_error(format!("{e:#}"))],
+        Err(e) => {
+            eprintln!("warp-max-server: provider call failed: {e:#}");
+            return vec![init, sse::finished_error(format!("{e:#}"))];
+        }
     };
 
     let mut out_messages: Vec<api::Message> = Vec::new();

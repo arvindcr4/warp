@@ -51,6 +51,16 @@ pub async fn call(
         .await
         .context("provider response was not valid JSON")?;
 
+    let debug = std::env::var("WARP_MAX_DEBUG").is_ok();
+    if debug {
+        eprintln!(
+            "warp-max-server: provider {} -> status {} body {}",
+            endpoint,
+            status.as_u16(),
+            truncate(&payload.to_string(), 4000)
+        );
+    }
+
     if !status.is_success() {
         let message = payload["error"]["message"]
             .as_str()
@@ -59,7 +69,18 @@ pub async fn call(
     }
 
     let message = &payload["choices"][0]["message"];
-    let text = message["content"].as_str().unwrap_or_default().to_string();
+    let mut text = extract_text(&message["content"]);
+    // Some reasoning models put the user-facing answer only in
+    // `reasoning_content` when no separate content is produced.
+    if text.trim().is_empty() {
+        text = message["reasoning_content"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+    }
+    // MiniMax M-series embed chain-of-thought as <think>...</think> inside the
+    // content. Strip it so only the user-facing answer is shown.
+    text = strip_think_blocks(&text);
 
     let tool_calls = message["tool_calls"]
         .as_array()
@@ -87,5 +108,56 @@ pub async fn call(
         })
         .unwrap_or_default();
 
+    if debug {
+        eprintln!(
+            "warp-max-server: parsed text_len={} tool_calls={}",
+            text.len(),
+            (&tool_calls as &Vec<(String, String, String)>).len()
+        );
+    }
+
     Ok(ProviderTurn { text, tool_calls })
+}
+
+/// Extracts assistant text from an OpenAI `message.content`, which may be a
+/// plain string or an array of content parts (`{type:"text", text:"..."}`).
+fn extract_text(content: &Value) -> String {
+    match content {
+        Value::String(s) => s.clone(),
+        Value::Array(parts) => parts
+            .iter()
+            .filter_map(|p| p["text"].as_str())
+            .collect::<Vec<_>>()
+            .join(""),
+        _ => String::new(),
+    }
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let head: String = s.chars().take(max).collect();
+        format!("{head}…[truncated]")
+    }
+}
+
+/// Removes `<think>...</think>` reasoning blocks from model output, returning
+/// the trimmed user-facing answer. Handles an unclosed `<think>` (drops to end)
+/// and multiple blocks.
+fn strip_think_blocks(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(open) = rest.find("<think>") {
+        out.push_str(&rest[..open]);
+        match rest[open..].find("</think>") {
+            Some(close) => rest = &rest[open + close + "</think>".len()..],
+            None => {
+                rest = "";
+                break;
+            }
+        }
+    }
+    out.push_str(rest);
+    out.trim().to_string()
 }
