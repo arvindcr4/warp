@@ -1664,6 +1664,11 @@ impl RootView {
 
         let auth_onboarding_state = if auth_state.is_logged_in() {
             AuthOnboardingState::Terminal(workspace_args.create_workspace(ctx))
+        } else if matches!(ChannelState::channel(), warp_core::channel::Channel::Oss) {
+            // Warp Max: no Warp account is required (all AI runs on the user's
+            // own keys via the local agent backend), so boot straight into the
+            // terminal with no login or onboarding gate.
+            AuthOnboardingState::Terminal(workspace_args.create_workspace(ctx))
         } else {
             cfg_if! {
                 if #[cfg(target_family = "wasm")] {

@@ -100,7 +100,10 @@ impl AuthSession {
         }
 
         let Some(credentials) = self.auth_state.credentials() else {
-            bail!("missing authentication credentials");
+            // Warp Max runs against a local agent backend that does not require
+            // Warp authentication. When the user is logged out we proceed with
+            // no auth token rather than failing the request.
+            return Ok(AuthToken::NoAuth);
         };
 
         match credentials {

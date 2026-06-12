@@ -8,12 +8,23 @@ use warp_core::AppId;
 
 // Simple wrapper around warp::run() for Warp OSS builds.
 fn main() -> Result<()> {
+    // Warp Max routes all AI/agent traffic to a LOCAL agent backend
+    // (warp-max-server) that drives the user's own LLM keys directly, instead
+    // of Warp's cloud at app.warp.dev. Override with WARP_MAX_SERVER_URL.
+    let server_root_url = std::env::var("WARP_MAX_SERVER_URL")
+        .unwrap_or_else(|_| "http://localhost:8765".to_string());
     let mut state = ChannelState::new(
         Channel::Oss,
         ChannelConfig {
             app_id: AppId::new("dev", "warp", "WarpOss"),
             logfile_name: "warp-oss.log".into(),
-            server_config: WarpServerConfig::production(),
+            server_config: WarpServerConfig {
+                server_root_url: server_root_url.clone().into(),
+                rtc_server_url: WarpServerConfig::production().rtc_server_url,
+                session_sharing_server_url: None,
+                firebase_auth_api_key: WarpServerConfig::production().firebase_auth_api_key,
+                iap_config: None,
+            },
             oz_config: OzConfig::production(),
             telemetry_config: None,
             crash_reporting_config: None,

@@ -1,5 +1,61 @@
 # MiniMax Token Plan & Anthropic-Compatible API Support
 
+## Warp Max: no Warp account, all AI on your own keys
+
+"Warp Max" runs the agent entirely on your own LLM keys with **no Warp login**
+and **no calls to app.warp.dev**. This is a deeper change than BYOK: stock Warp
+(even with BYOK) sends every agent request to Warp's closed-source server,
+which makes the provider call for you and requires authentication. Warp Max
+replaces that server with a local one.
+
+### How it works
+
+```
+Warp Max client  ──POST /ai/multi-agent (protobuf Request)──►  warp-max-server (localhost:8765)
+   (no login)    ◄──── SSE: ResponseEvent protobufs ──────────   (calls YOUR key directly)
+```
+
+- The client speaks Warp's multi-agent protobuf protocol unchanged. The
+  agentic loop (tool calls → execute locally → re-request) is driven by the
+  client exactly as before.
+- `warp-max-server` (`crates/warp_local_server`) decodes each `Request`,
+  reads the endpoint URL + API key the client ships inside
+  `settings.custom_model_providers` (i.e. the custom endpoint you configured),
+  calls that OpenAI-compatible Chat Completions endpoint, and streams the
+  result back as `ResponseEvent`s. It is **stateless** — one provider turn per
+  request — and stores no credentials.
+- Supported tools (v1): `run_shell_command`, `read_files`, `apply_file_diffs`.
+  More can be added in `crates/warp_local_server/src/tools.rs`.
+
+### Client changes that make it account-free
+
+- `app/src/bin/oss.rs` — server URL points at `http://localhost:8765`
+  (override with `WARP_MAX_SERVER_URL`).
+- `app/src/root_view.rs` — the Oss build boots straight to the terminal (no
+  login/onboarding gate).
+- `app/src/workspaces/user_workspaces.rs` — BYOK and custom inference are
+  enabled without a Warp account.
+- `crates/warp_server_client/src/auth/session.rs` — a missing-credentials
+  state yields `NoAuth` instead of failing requests.
+
+### Running it
+
+```bash
+# 1. Start the local agent backend
+cargo run -p warp_local_server --bin warp-max-server      # listens on 127.0.0.1:8765
+
+# 2. Launch Warp Max (already installed at /Applications/Warp Max.app), then:
+#    Settings → AI → Custom inference → + Add custom model → MiniMax Token Plan
+#    Paste your sk-cp... key, pick MiniMax-M3, and start chatting in Agent Mode.
+```
+
+The server uses the OpenAI-compatible endpoint (MiniMax `/v1`). No key is
+stored by the server; it is read from each request and used only for that call.
+
+---
+
+# (Original) MiniMax presets & Anthropic-compatible custom endpoints
+
 This fork adds first-class support for using a **MiniMax Token Plan**
 subscription (and, more generally, any Anthropic-compatible Messages API) as a
 custom inference endpoint for Warp's agent.

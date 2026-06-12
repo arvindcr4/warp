@@ -15123,6 +15123,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "warp_local_server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "axum",
+ "base64 0.22.1",
+ "futures",
+ "prost",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
+ "warp_multi_agent_api",
+]
+
+[[package]]
 name = "warp_logging"
 version = "0.0.0"
 dependencies = [
