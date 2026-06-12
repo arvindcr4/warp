@@ -22,11 +22,6 @@ use warp_multi_agent_api as api;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let bind = std::env::args()
-        .nth(1)
-        .or_else(|| std::env::var("WARP_MAX_BIND").ok())
-        .unwrap_or_else(|| "127.0.0.1:8765".to_string());
-
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/ai/multi-agent", post(handle_multi_agent))
@@ -34,9 +29,40 @@ async fn main() -> anyhow::Result<()> {
         .route("/graphql/v2", post(handle_graphql))
         .fallback(handle_fallback);
 
-    let listener = tokio::net::TcpListener::bind(&bind).await?;
-    eprintln!("warp-max-server listening on http://{bind}");
-    axum::serve(listener, app).await?;
+    // An explicit bind (CLI arg or WARP_MAX_BIND) uses a single address.
+    // Otherwise bind BOTH loopback families on port 8765 so the client's
+    // `localhost` connects regardless of whether it resolves to 127.0.0.1 or
+    // ::1 (macOS resolves localhost to both; hyper may try ::1 first).
+    let explicit_bind = std::env::args()
+        .nth(1)
+        .or_else(|| std::env::var("WARP_MAX_BIND").ok());
+
+    if let Some(bind) = explicit_bind {
+        let listener = tokio::net::TcpListener::bind(&bind).await?;
+        eprintln!("warp-max-server listening on http://{bind}");
+        axum::serve(listener, app).await?;
+        return Ok(());
+    }
+
+    let v4 = tokio::net::TcpListener::bind("127.0.0.1:8765").await?;
+    eprintln!("warp-max-server listening on http://127.0.0.1:8765");
+    let mut tasks = Vec::new();
+    {
+        let app = app.clone();
+        tasks.push(tokio::spawn(async move { axum::serve(v4, app).await }));
+    }
+    // IPv6 loopback is best-effort: skip if the system has IPv6 disabled.
+    match tokio::net::TcpListener::bind("[::1]:8765").await {
+        Ok(v6) => {
+            eprintln!("warp-max-server listening on http://[::1]:8765");
+            let app = app.clone();
+            tasks.push(tokio::spawn(async move { axum::serve(v6, app).await }));
+        }
+        Err(e) => eprintln!("warp-max-server: skipping IPv6 loopback ([::1]:8765): {e}"),
+    }
+    for task in tasks {
+        let _ = task.await;
+    }
     Ok(())
 }
 
