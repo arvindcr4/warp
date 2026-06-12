@@ -15132,6 +15132,7 @@ dependencies = [
  "base64 0.22.1",
  "futures",
  "prost",
+ "prost-types",
  "reqwest",
  "serde",
  "serde_json",

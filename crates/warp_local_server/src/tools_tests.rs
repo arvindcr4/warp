@@ -1,8 +1,14 @@
 use super::*;
+use crate::mcp::McpRegistry;
+use warp_multi_agent_api as api;
+
+fn no_mcp() -> McpRegistry {
+    McpRegistry::default()
+}
 
 #[test]
 fn schemas_advertise_core_tools() {
-    let names: Vec<String> = tool_schemas()
+    let names: Vec<String> = tool_schemas(&no_mcp())
         .iter()
         .map(|t| t["function"]["name"].as_str().unwrap().to_string())
         .collect();
@@ -17,6 +23,7 @@ fn run_shell_command_maps_to_warp_tool_call() {
         "call_1",
         "run_shell_command",
         r#"{"command":"ls -la","is_read_only":true}"#,
+        &no_mcp(),
     )
     .expect("should map");
     let Some(api::message::Message::ToolCall(tc)) = msg.message else {
@@ -38,7 +45,7 @@ fn apply_file_diffs_maps_all_change_kinds() {
         "new_files": [{"file_path": "b.rs", "content": "fn main(){}"}],
         "deleted_files": ["c.rs"]
     }"#;
-    let msg = openai_tool_call_to_warp("call_2", "apply_file_diffs", args).unwrap();
+    let msg = openai_tool_call_to_warp("call_2", "apply_file_diffs", args, &no_mcp()).unwrap();
     let Some(api::message::Message::ToolCall(tc)) = msg.message else {
         panic!();
     };
@@ -54,13 +61,18 @@ fn apply_file_diffs_maps_all_change_kinds() {
 
 #[test]
 fn unknown_tool_returns_none() {
-    assert!(openai_tool_call_to_warp("x", "nonexistent_tool", "{}").is_none());
+    assert!(openai_tool_call_to_warp("x", "nonexistent_tool", "{}", &no_mcp()).is_none());
 }
 
 #[test]
 fn warp_tool_call_round_trips_to_openai() {
-    let msg =
-        openai_tool_call_to_warp("call_3", "read_files", r#"{"paths":["x.rs","y.rs"]}"#).unwrap();
+    let msg = openai_tool_call_to_warp(
+        "call_3",
+        "read_files",
+        r#"{"paths":["x.rs","y.rs"]}"#,
+        &no_mcp(),
+    )
+    .unwrap();
     let Some(api::message::Message::ToolCall(tc)) = msg.message else {
         panic!();
     };

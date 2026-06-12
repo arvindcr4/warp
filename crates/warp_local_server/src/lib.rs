@@ -4,6 +4,7 @@
 //! end-to-end against a mock provider.
 
 pub mod history;
+pub mod mcp;
 pub mod provider;
 pub mod sse;
 pub mod tools;
@@ -138,7 +139,15 @@ pub async fn run_turn(
         );
     }
 
-    let turn = match provider::call(client, &provider, messages, tools::tool_schemas()).await {
+    let mcp = mcp::McpRegistry::from_request(&request);
+    if !mcp.is_empty() {
+        eprintln!(
+            "warp-max-server: advertising {} MCP tool(s)",
+            mcp.tools.len()
+        );
+    }
+
+    let turn = match provider::call(client, &provider, messages, tools::tool_schemas(&mcp)).await {
         Ok(turn) => turn,
         Err(e) => {
             eprintln!("warp-max-server: provider call failed: {e:#}");
@@ -151,7 +160,7 @@ pub async fn run_turn(
         out_messages.push(agent_output(turn.text));
     }
     for (id, name, arguments) in &turn.tool_calls {
-        if let Some(message) = tools::openai_tool_call_to_warp(id, name, arguments) {
+        if let Some(message) = tools::openai_tool_call_to_warp(id, name, arguments, &mcp) {
             out_messages.push(message);
         }
     }

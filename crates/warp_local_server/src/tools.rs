@@ -12,8 +12,27 @@
 use serde_json::{json, Value};
 use warp_multi_agent_api as api;
 
-/// OpenAI `tools` array advertised to the model.
-pub fn tool_schemas() -> Vec<Value> {
+use crate::mcp::{self, McpRegistry};
+
+/// OpenAI `tools` array advertised to the model: the built-in tools plus any
+/// MCP tools from the request's MCP context.
+pub fn tool_schemas(mcp: &McpRegistry) -> Vec<Value> {
+    let mut tools = builtin_tool_schemas();
+    for tool in &mcp.tools {
+        tools.push(json!({
+            "type": "function",
+            "function": {
+                "name": tool.openai_name,
+                "description": tool.description,
+                "parameters": tool.input_schema,
+            }
+        }));
+    }
+    tools
+}
+
+/// The built-in coding tools always available regardless of MCP.
+fn builtin_tool_schemas() -> Vec<Value> {
     vec![
         json!({
             "type": "function",
@@ -98,6 +117,7 @@ pub fn openai_tool_call_to_warp(
     tool_call_id: &str,
     name: &str,
     arguments: &str,
+    mcp: &McpRegistry,
 ) -> Option<api::Message> {
     use api::message::tool_call::Tool;
     let args: Value = serde_json::from_str(arguments).unwrap_or_else(|_| json!({}));
@@ -169,7 +189,16 @@ pub fn openai_tool_call_to_warp(
                 ..Default::default()
             })
         }
-        _ => return None,
+        other => {
+            // MCP tool? Map to a CallMcpTool the client executes against the
+            // real MCP server.
+            let def = mcp.lookup(other)?;
+            Tool::CallMcpTool(api::message::tool_call::CallMcpTool {
+                name: def.real_name.clone(),
+                args: Some(mcp::json_to_struct(&args)),
+                server_id: def.server_id.clone(),
+            })
+        }
     };
 
     Some(api::Message {
@@ -186,23 +215,30 @@ pub fn openai_tool_call_to_warp(
 /// object so prior turns replay correctly to the model.
 pub fn warp_tool_call_to_openai(tc: &api::message::ToolCall) -> Option<Value> {
     use api::message::tool_call::Tool;
-    let (name, args) = match tc.tool.as_ref()? {
+    let (name, args): (String, Value) = match tc.tool.as_ref()? {
         Tool::RunShellCommand(c) => (
-            "run_shell_command",
+            "run_shell_command".to_string(),
             json!({"command": c.command, "is_read_only": c.is_read_only}),
         ),
         Tool::ReadFiles(r) => (
-            "read_files",
+            "read_files".to_string(),
             json!({"paths": r.files.iter().map(|f| f.name.clone()).collect::<Vec<_>>()}),
         ),
         Tool::ApplyFileDiffs(a) => (
-            "apply_file_diffs",
+            "apply_file_diffs".to_string(),
             json!({
                 "summary": a.summary,
                 "diffs": a.diffs.iter().map(|d| json!({"file_path": d.file_path, "search": d.search, "replace": d.replace})).collect::<Vec<_>>(),
                 "new_files": a.new_files.iter().map(|n| json!({"file_path": n.file_path, "content": n.content})).collect::<Vec<_>>(),
                 "deleted_files": a.deleted_files.iter().map(|d| d.file_path.clone()).collect::<Vec<_>>(),
             }),
+        ),
+        Tool::CallMcpTool(c) => (
+            mcp::sanitize_tool_name(&c.name),
+            c.args
+                .as_ref()
+                .map(mcp::struct_to_json)
+                .unwrap_or_else(|| json!({})),
         ),
         _ => return None,
     };
@@ -221,6 +257,7 @@ pub fn history_tool_result_to_text(tr: &api::message::ToolCallResult) -> String 
         Some(R::RunShellCommand(r)) => run_shell_text(r),
         Some(R::ReadFiles(r)) => read_files_text(r),
         Some(R::ApplyFileDiffs(r)) => apply_diffs_text(r),
+        Some(R::CallMcpTool(r)) => call_mcp_text(r),
         Some(R::Cancel(_)) => "(cancelled by user)".to_string(),
         _ => String::new(),
     }
@@ -234,7 +271,28 @@ pub fn input_tool_result_to_text(tr: &api::request::input::ToolCallResult) -> St
         Some(R::RunShellCommand(r)) => run_shell_text(r),
         Some(R::ReadFiles(r)) => read_files_text(r),
         Some(R::ApplyFileDiffs(r)) => apply_diffs_text(r),
+        Some(R::CallMcpTool(r)) => call_mcp_text(r),
         _ => String::new(),
+    }
+}
+
+fn call_mcp_text(r: &api::CallMcpToolResult) -> String {
+    use api::call_mcp_tool_result::success::result::Result as Item;
+    use api::call_mcp_tool_result::Result as R;
+    match r.result.as_ref() {
+        Some(R::Success(s)) => s
+            .results
+            .iter()
+            .filter_map(|res| match res.result.as_ref() {
+                Some(Item::Text(t)) => Some(t.text.clone()),
+                Some(Item::Image(_)) => Some("[image]".to_string()),
+                Some(Item::Resource(_)) => Some("[resource]".to_string()),
+                None => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Some(R::Error(e)) => format!("MCP tool error: {}", e.message),
+        None => String::new(),
     }
 }
 
