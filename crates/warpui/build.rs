@@ -82,6 +82,21 @@ fn compile_metal_shaders() {
     println!("cargo:rerun-if-changed={header_path}");
     println!("cargo:rerun-if-changed={metal_path}");
     println!("cargo:rerun-if-env-changed=MACOSX_DEPLOYMENT_TARGET");
+    println!("cargo:rerun-if-env-changed=WARP_PREBUILT_METALLIB");
+
+    // Escape hatch for environments without the Metal toolchain (e.g. only
+    // Command Line Tools installed, where `xcrun metal` is unavailable): use a
+    // prebuilt shaders.metallib instead of compiling from source. The library
+    // must export the same shader functions as shaders.metal and have been
+    // built against the same shader_types.h layout.
+    if let Ok(prebuilt) = env::var("WARP_PREBUILT_METALLIB") {
+        if !prebuilt.trim().is_empty() {
+            std::fs::copy(&prebuilt, lib_path).unwrap_or_else(|e| {
+                panic!("error copying prebuilt metallib from {prebuilt}: {e}")
+            });
+            return;
+        }
+    }
 
     // Pin the AIR bytecode target to `MACOSX_DEPLOYMENT_TARGET`. Without an
     // explicit `-mmacosx-version-min`, `xcrun metal` on recent Xcode toolchains
