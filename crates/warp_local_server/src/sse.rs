@@ -78,6 +78,23 @@ pub fn add_messages(task_id: String, messages: Vec<api::Message>) -> api::Client
     }
 }
 
+/// Builds a `CreateTask` client action for a new root task. For a new
+/// conversation the client sends no tasks and expects the server to create the
+/// root task; the client then re-keys its pending exchange to this task id, so
+/// subsequent `AddMessagesToTask` with the same id renders correctly.
+pub fn create_task(task_id: String) -> api::ClientAction {
+    api::ClientAction {
+        action: Some(api::client_action::Action::CreateTask(
+            api::client_action::CreateTask {
+                task: Some(api::Task {
+                    id: task_id,
+                    ..Default::default()
+                }),
+            },
+        )),
+    }
+}
+
 #[cfg(test)]
 #[path = "sse_tests.rs"]
 mod tests;

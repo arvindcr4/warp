@@ -71,13 +71,35 @@ pub fn resolve_provider(request: &api::Request) -> Option<Provider> {
     })
 }
 
-/// The task id that response messages should be added to. Prefers the last
-/// task in the request (the active one); mints a fallback if none exist.
+/// The task id that response messages should be added to.
+///
+/// The Warp client registers a streaming "exchange" keyed by the task id that
+/// holds the user's input, and requires the server's `AddMessagesToTask` to use
+/// that exact id (otherwise the response is dropped with `ExchangeNotFound`).
+/// So we prefer the last task that contains a `UserQuery`/`ToolCallResult`
+/// (the active exchange's task), then fall back to the last task, then the
+/// first task.
 pub fn target_task_id(request: &api::Request) -> String {
-    request
+    let tasks = request
         .task_context
         .as_ref()
-        .and_then(|tc| tc.tasks.last())
+        .map(|tc| tc.tasks.as_slice())
+        .unwrap_or(&[]);
+
+    // Last task whose messages include a user query or tool result.
+    let active = tasks.iter().rev().find(|task| {
+        task.messages.iter().any(|m| {
+            matches!(
+                m.message,
+                Some(api::message::Message::UserQuery(_))
+                    | Some(api::message::Message::ToolCallResult(_))
+            )
+        })
+    });
+
+    active
+        .or_else(|| tasks.last())
+        .or_else(|| tasks.first())
         .map(|t| t.id.clone())
         .filter(|id| !id.is_empty())
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())

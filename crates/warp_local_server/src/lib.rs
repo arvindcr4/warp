@@ -50,15 +50,46 @@ pub async fn run_turn(client: &reqwest::Client, request: api::Request) -> Vec<ap
 
     let mut messages = vec![serde_json::json!({"role": "system", "content": SYSTEM_PROMPT})];
     messages.extend(history::reconstruct_messages(&request));
-    let task_id = history::target_task_id(&request);
+
+    // For a new conversation the client sends no tasks and expects the server
+    // to create the root task (it then re-keys its pending exchange to our id).
+    // For continuations it sends the existing task, which we must reuse.
+    let is_new_conversation = request
+        .task_context
+        .as_ref()
+        .map(|tc| tc.tasks.is_empty())
+        .unwrap_or(true);
+    let task_id = if is_new_conversation {
+        uuid::Uuid::new_v4().to_string()
+    } else {
+        history::target_task_id(&request)
+    };
 
     if std::env::var("WARP_MAX_DEBUG").is_ok() {
+        let tasks_dump: Vec<String> = request
+            .task_context
+            .as_ref()
+            .map(|tc| {
+                tc.tasks
+                    .iter()
+                    .map(|t| format!("{}#msgs={}", t.id, t.messages.len()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let input_kind = request
+            .input
+            .as_ref()
+            .and_then(|i| i.r#type.as_ref())
+            .map(|t| format!("{t:?}").chars().take(40).collect::<String>())
+            .unwrap_or_else(|| "none".to_string());
         eprintln!(
-            "warp-max-server: turn task_id={} base_url={} model={} history_msgs={}",
+            "warp-max-server: turn task_id={} base_url={} model={} history_msgs={} tasks=[{}] input={}",
             task_id,
             provider.base_url,
             provider.model,
-            messages.len()
+            messages.len(),
+            tasks_dump.join(", "),
+            input_kind
         );
     }
 
@@ -83,11 +114,13 @@ pub async fn run_turn(client: &reqwest::Client, request: api::Request) -> Vec<ap
         out_messages.push(agent_output("(no response)".to_string()));
     }
 
-    vec![
-        init,
-        sse::client_actions(vec![sse::add_messages(task_id, out_messages)]),
-        sse::finished_done(),
-    ]
+    let mut actions = Vec::new();
+    if is_new_conversation {
+        actions.push(sse::create_task(task_id.clone()));
+    }
+    actions.push(sse::add_messages(task_id, out_messages));
+
+    vec![init, sse::client_actions(actions), sse::finished_done()]
 }
 
 fn agent_output(text: String) -> api::Message {

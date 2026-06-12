@@ -12,7 +12,7 @@ use crate::auth::AuthStateProvider;
 use crate::workspaces::user_workspaces::UserWorkspaces;
 
 /// Kick off a device authorization login flow and handle auth events.
-pub fn login(ctx: &mut AppContext) -> Result<()> {
+pub fn login(api_key: Option<String>, ctx: &mut AppContext) -> Result<()> {
     let auth_state = AuthStateProvider::as_ref(ctx).get();
     let has_cached_credentials = auth_state.is_logged_in();
 
@@ -24,6 +24,16 @@ pub fn login(ctx: &mut AppContext) -> Result<()> {
     // that arrive before device auth has started are leftover refresh
     // errors and should be ignored rather than treated as terminal.
     let mut started_device_auth = !has_cached_credentials;
+    
+    // If an API key was provided via the CLI, exchange it and skip the browser flow.
+    if let Some(key) = api_key {
+        AuthManager::handle(ctx).update(ctx, |auth_manager, ctx| {
+            auth_manager.fetch_user(crate::auth::credentials::LoginToken::ApiKey(key), false);
+        });
+        println!("Logging in with API key...");
+        return Ok(());
+    }
+
     ctx.subscribe_to_model(
         &AuthManager::handle(ctx),
         move |_, event, ctx| match event {
