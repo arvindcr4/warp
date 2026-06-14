@@ -68,3 +68,55 @@ fn finished_done_frame_round_trips() {
         Some(api::response_event::stream_finished::Reason::Done(_))
     ));
 }
+
+#[test]
+fn turn_frames_ok_as_init_actions_finished() {
+    let events = turn(
+        "c".to_string(),
+        "r".to_string(),
+        Ok(vec![add_messages("t".to_string(), vec![])]),
+    );
+    assert_eq!(events.len(), 3);
+    assert!(matches!(
+        events[0].r#type,
+        Some(api::response_event::Type::Init(_))
+    ));
+    assert!(matches!(
+        events[1].r#type,
+        Some(api::response_event::Type::ClientActions(_))
+    ));
+    assert!(matches!(
+        events[2].r#type,
+        Some(api::response_event::Type::Finished(_))
+    ));
+}
+
+#[test]
+fn turn_frames_err_as_init_then_finished_error() {
+    let events = turn("c".to_string(), "r".to_string(), Err("boom".to_string()));
+    assert_eq!(events.len(), 2);
+    let Some(api::response_event::Type::Finished(f)) = &events[1].r#type else {
+        panic!("expected Finished");
+    };
+    let Some(api::response_event::stream_finished::Reason::InternalError(e)) = &f.reason else {
+        panic!("expected InternalError");
+    };
+    assert_eq!(e.message, "boom");
+}
+
+#[test]
+fn decode_request_extracts_bearer_key() {
+    let bytes = api::Request::default().encode_to_vec();
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert("Authorization", "Bearer sk-xyz".parse().unwrap());
+    let (_req, key) = decode_request(&bytes, &headers).expect("decodes");
+    assert_eq!(key.as_deref(), Some("sk-xyz"));
+}
+
+#[test]
+fn decode_request_without_auth_header_yields_no_key() {
+    let bytes = api::Request::default().encode_to_vec();
+    let headers = axum::http::HeaderMap::new();
+    let (_req, key) = decode_request(&bytes, &headers).expect("decodes");
+    assert!(key.is_none());
+}

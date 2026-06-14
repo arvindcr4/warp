@@ -147,38 +147,6 @@ fn target_task_id_uses_last_task() {
 }
 
 #[test]
-fn resolve_provider_matches_config_key() {
-    let req = api::Request {
-        settings: Some(api::request::Settings {
-            model_config: Some(api::request::settings::ModelConfig {
-                base: "cfg-key-123".to_string(),
-                ..Default::default()
-            }),
-            custom_model_providers: Some(api::request::settings::CustomModelProviders {
-                providers: vec![
-                    api::request::settings::custom_model_providers::CustomModelProvider {
-                        base_url: "https://api.minimax.io/v1".to_string(),
-                        api_key: "sk-cp-test".to_string(),
-                        models: vec![
-                            api::request::settings::custom_model_providers::CustomModel {
-                                slug: "MiniMax-M3".to_string(),
-                                config_key: "cfg-key-123".to_string(),
-                            },
-                        ],
-                    },
-                ],
-            }),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-    let provider = resolve_provider(&req, None).expect("should resolve");
-    assert_eq!(provider.base_url, "https://api.minimax.io/v1");
-    assert_eq!(provider.api_key, "sk-cp-test");
-    assert_eq!(provider.model, "MiniMax-M3");
-}
-
-#[test]
 fn input_user_query_not_duplicated_when_already_in_history() {
     let mut req = request_with_messages(vec![user_message("only once")]);
     req.input = Some(api::request::Input {
@@ -201,4 +169,41 @@ fn input_user_query_not_duplicated_when_already_in_history() {
     let msgs = reconstruct_messages(&req);
     let user_count = msgs.iter().filter(|m| m["role"] == "user").count();
     assert_eq!(user_count, 1, "user query should not be duplicated");
+}
+
+#[test]
+fn assistant_tool_call_without_result_is_dropped() {
+    // A tool call whose result never came back must not reach the provider,
+    // else MiniMax rejects the turn with 2013. The builder drops it.
+    let req = request_with_messages(vec![
+        user_message("do it"),
+        tool_call_message("c1", "ls"),
+        agent_message("done anyway"),
+    ]);
+    let msgs = reconstruct_messages(&req);
+    assert!(
+        msgs.iter().all(|m| !m["tool_calls"].is_array()),
+        "unpaired assistant tool_calls dropped"
+    );
+    assert!(
+        msgs.iter().all(|m| m["role"] != "tool"),
+        "no tool result present"
+    );
+    assert!(msgs
+        .iter()
+        .any(|m| m["role"] == "assistant" && m["content"] == "done anyway"));
+}
+
+#[test]
+fn orphan_tool_result_without_call_is_dropped() {
+    // A tool result with no matching call is an orphan and must be dropped.
+    let req = request_with_messages(vec![
+        user_message("hi"),
+        tool_result_message("ghost", "stale output"),
+    ]);
+    let msgs = reconstruct_messages(&req);
+    assert!(
+        msgs.iter().all(|m| m["role"] != "tool"),
+        "orphan tool result dropped"
+    );
 }

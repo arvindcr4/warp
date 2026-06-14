@@ -1,81 +1,10 @@
-//! Reconstructs an OpenAI-format chat history and resolves the target provider
-//! from a decoded Warp `Request`.
+//! Reconstructs an OpenAI-format chat history from a decoded Warp `Request`,
+//! and reads the routing ids (task, conversation) the response must echo back.
 
 use serde_json::{json, Value};
 use warp_multi_agent_api as api;
 
 use crate::tools;
-
-/// The resolved upstream LLM provider for a request: an OpenAI-compatible
-/// Chat Completions endpoint plus the model slug to call.
-#[derive(Debug, Clone)]
-pub struct Provider {
-    pub base_url: String,
-    pub api_key: String,
-    pub model: String,
-}
-
-/// Resolves the provider/model for this request.
-///
-/// The Warp client ships the user's configured custom endpoints in
-/// `settings.custom_model_providers`, and the selected model's `config_key` in
-/// `settings.model_config.base`. We find the provider+model whose `config_key`
-/// matches and use its `base_url`/`api_key`. Falls back to env overrides
-/// (`WARP_MAX_BASE_URL`, `WARP_MAX_API_KEY`, `WARP_MAX_MODEL`) so the server is
-/// usable even before a custom endpoint is configured.
-pub fn resolve_provider(
-    request: &api::Request,
-    auth_header_api_key: Option<String>,
-) -> Option<Provider> {
-    let settings = request.settings.as_ref();
-    let selected = settings
-        .and_then(|s| s.model_config.as_ref())
-        .map(|m| m.base.clone())
-        .unwrap_or_default();
-
-    if let Some(providers) = settings.and_then(|s| s.custom_model_providers.as_ref()) {
-        for provider in &providers.providers {
-            for model in &provider.models {
-                if model.config_key == selected && !selected.is_empty() {
-                    return Some(Provider {
-                        base_url: provider.base_url.clone(),
-                        api_key: provider.api_key.clone(),
-                        model: model.slug.clone(),
-                    });
-                }
-            }
-        }
-        // No exact config_key match: if there's exactly one custom model, use it.
-        if providers.providers.len() == 1 && providers.providers[0].models.len() == 1 {
-            let provider = &providers.providers[0];
-            let model = &provider.models[0];
-            return Some(Provider {
-                base_url: provider.base_url.clone(),
-                api_key: provider.api_key.clone(),
-                model: model.slug.clone(),
-            });
-        }
-    }
-
-    // Env fallback.
-    let base_url = std::env::var("WARP_MAX_BASE_URL")
-        .ok()
-        .unwrap_or_else(|| "https://api.minimax.chat/v1".to_string());
-    let api_key = auth_header_api_key
-        .unwrap_or_else(|| std::env::var("WARP_MAX_API_KEY").unwrap_or_default());
-    let model = std::env::var("WARP_MAX_MODEL").unwrap_or_else(|_| {
-        if selected.is_empty() {
-            "gpt-4o".to_string()
-        } else {
-            selected.clone()
-        }
-    });
-    Some(Provider {
-        base_url,
-        api_key,
-        model,
-    })
-}
 
 /// The task id that response messages should be added to.
 ///
@@ -124,10 +53,12 @@ pub fn conversation_id(request: &api::Request) -> String {
 /// Reconstructs the OpenAI-format `messages` array from the request's task
 /// history plus the new turn in `input`.
 ///
-/// Consecutive assistant tool calls are merged into a single assistant message
-/// with a `tool_calls` array, and any buffered tool calls are flushed
-/// immediately before a tool result — this preserves the strict ordering
-/// providers like MiniMax enforce ("tool call result must follow tool call").
+/// The returned transcript is guaranteed provider-valid: assistant tool calls
+/// are paired with their results, results follow their call directly, and any
+/// unpaired call or orphan result is dropped — the whole reason this module
+/// exists (it avoids MiniMax error 2013, "tool call and result not match").
+/// That guarantee lives in one place: [`MessageBuilder`], whose `finish`
+/// reconciles pairing as its last step.
 pub fn reconstruct_messages(request: &api::Request) -> Vec<Value> {
     let mut builder = MessageBuilder::default();
 
@@ -140,15 +71,88 @@ pub fn reconstruct_messages(request: &api::Request) -> Vec<Value> {
     }
 
     append_input(request, &mut builder);
-    let messages = builder.finish();
-    sanitize_tool_pairing(messages)
+    builder.finish()
+}
+
+/// Accumulates OpenAI-format chat messages and produces a provider-valid
+/// transcript. It buffers assistant tool calls so parallel/consecutive calls
+/// collapse into one assistant message and tool results always follow it
+/// directly (adjacency), and its `finish` reconciles pairing so unpaired calls
+/// and orphan results are dropped (completeness). Adjacency and completeness —
+/// the full MiniMax-2013 invariant — therefore have a single owner.
+#[derive(Default)]
+struct MessageBuilder {
+    messages: Vec<Value>,
+    pending_tool_calls: Vec<Value>,
+    seen_tool_results: std::collections::HashSet<String>,
+}
+
+impl MessageBuilder {
+    fn flush_tool_calls(&mut self) {
+        if !self.pending_tool_calls.is_empty() {
+            self.messages.push(json!({
+                "role": "assistant",
+                "content": Value::Null,
+                "tool_calls": std::mem::take(&mut self.pending_tool_calls),
+            }));
+        }
+    }
+
+    fn push_user(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        self.flush_tool_calls();
+        let dup = matches!(self.messages.last(), Some(last) if last["role"] == "user" && last["content"] == text);
+        if !dup {
+            self.messages.push(json!({"role": "user", "content": text}));
+        }
+    }
+
+    fn push_assistant_text(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        self.flush_tool_calls();
+        self.messages
+            .push(json!({"role": "assistant", "content": text}));
+    }
+
+    fn add_tool_call(&mut self, call: Value) {
+        self.pending_tool_calls.push(call);
+    }
+
+    fn push_tool_result(&mut self, tool_call_id: &str, content: String) {
+        if self.seen_tool_results.contains(tool_call_id) {
+            return;
+        }
+        self.seen_tool_results.insert(tool_call_id.to_string());
+        self.flush_tool_calls();
+        self.messages.push(json!({
+            "role": "tool",
+            "tool_call_id": tool_call_id,
+            "content": content,
+        }));
+    }
+
+    /// Flushes any buffered tool calls and returns the paired history. This is
+    /// the builder's single guarantee: every assistant `tool_calls` entry has a
+    /// matching `tool` result and vice versa, so callers never need a separate
+    /// sanitize pass.
+    fn finish(mut self) -> Vec<Value> {
+        self.flush_tool_calls();
+        reconcile_pairing(self.messages)
+    }
 }
 
 /// Enforces the provider invariant that every assistant `tool_calls` entry has
 /// exactly one matching `tool` result and vice versa. Drops assistant tool
 /// calls whose result is missing and orphan tool results whose call is missing
 /// (which otherwise trigger MiniMax's "tool call and result not match" (2013)).
-fn sanitize_tool_pairing(messages: Vec<Value>) -> Vec<Value> {
+///
+/// Private to this module: callers reach it only through
+/// [`MessageBuilder::finish`], so the invariant has a single entry point.
+fn reconcile_pairing(messages: Vec<Value>) -> Vec<Value> {
     use std::collections::HashSet;
 
     let call_ids: HashSet<String> = messages
@@ -206,70 +210,6 @@ fn sanitize_tool_pairing(messages: Vec<Value>) -> Vec<Value> {
     out
 }
 
-/// Accumulates OpenAI-format chat messages, buffering assistant tool calls so
-/// that parallel/consecutive calls collapse into one assistant message and tool
-/// results always follow it directly.
-#[derive(Default)]
-struct MessageBuilder {
-    messages: Vec<Value>,
-    pending_tool_calls: Vec<Value>,
-    seen_tool_results: std::collections::HashSet<String>,
-}
-
-impl MessageBuilder {
-    fn flush_tool_calls(&mut self) {
-        if !self.pending_tool_calls.is_empty() {
-            self.messages.push(json!({
-                "role": "assistant",
-                "content": Value::Null,
-                "tool_calls": std::mem::take(&mut self.pending_tool_calls),
-            }));
-        }
-    }
-
-    fn push_user(&mut self, text: &str) {
-        if text.is_empty() {
-            return;
-        }
-        self.flush_tool_calls();
-        let dup = matches!(self.messages.last(), Some(last) if last["role"] == "user" && last["content"] == text);
-        if !dup {
-            self.messages.push(json!({"role": "user", "content": text}));
-        }
-    }
-
-    fn push_assistant_text(&mut self, text: &str) {
-        if text.is_empty() {
-            return;
-        }
-        self.flush_tool_calls();
-        self.messages
-            .push(json!({"role": "assistant", "content": text}));
-    }
-
-    fn add_tool_call(&mut self, call: Value) {
-        self.pending_tool_calls.push(call);
-    }
-
-    fn push_tool_result(&mut self, tool_call_id: &str, content: String) {
-        if self.seen_tool_results.contains(tool_call_id) {
-            return;
-        }
-        self.seen_tool_results.insert(tool_call_id.to_string());
-        self.flush_tool_calls();
-        self.messages.push(json!({
-            "role": "tool",
-            "tool_call_id": tool_call_id,
-            "content": content,
-        }));
-    }
-
-    fn finish(mut self) -> Vec<Value> {
-        self.flush_tool_calls();
-        self.messages
-    }
-}
-
 fn append_history_message(message: &api::Message, builder: &mut MessageBuilder) {
     use api::message::Message as M;
     let Some(inner) = message.message.as_ref() else {
@@ -310,5 +250,4 @@ fn append_input(request: &api::Request, builder: &mut MessageBuilder) {
 }
 
 #[cfg(test)]
-#[path = "history_tests.rs"]
 mod tests;

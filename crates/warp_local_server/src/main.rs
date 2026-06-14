@@ -9,17 +9,18 @@
 //! back base64url-encoded `ResponseEvent` protobufs over SSE. Client-side tool
 //! calls (run command, read/apply files) are executed by the client, which
 //! then re-POSTs with the results — so we only do one provider turn per request.
+//!
+//! This binary is routing only: the wire contract (protobuf decode, SSE
+//! framing, body limit) lives in [`warp_local_server::wire`].
 
-use axum::body::{Body, Bytes};
+use axum::body::Bytes;
 use axum::extract::DefaultBodyLimit;
-use axum::http::StatusCode;
+use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use prost::Message as _;
 use serde_json::json;
-use warp_local_server::{run_turn, sse};
-use warp_multi_agent_api as api;
+use warp_local_server::{run_turn, wire};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -29,11 +30,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/agent-mode-evals/multi-agent", post(handle_multi_agent))
         .route("/graphql/v2", post(handle_graphql))
         .fallback(handle_fallback)
-        // Agent requests carry the full conversation history plus attached
-        // context and routinely exceed axum's 2 MB default body limit; the
-        // limit rejects them mid-upload, which the client surfaces as
-        // "Warp lost connection while receiving the agent response".
-        .layer(DefaultBodyLimit::max(256 * 1024 * 1024));
+        .layer(DefaultBodyLimit::max(wire::MAX_BODY_BYTES));
 
     // An explicit bind (CLI arg or WARP_MAX_BIND) uses a single address.
     // Otherwise bind BOTH loopback families on port 8765 so the client's
@@ -73,32 +70,16 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /// The core agent endpoint: decode the protobuf `Request`, run one provider
-/// turn, and stream the resulting `ResponseEvent`s back as SSE frames.
-async fn handle_multi_agent(headers: axum::http::HeaderMap, body: Bytes) -> Response {
-    let auth_header_api_key = headers
-        .get("Authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .map(|v| v.to_string());
-    let request = match api::Request::decode(body.as_ref()) {
-        Ok(request) => request,
-        Err(e) => {
-            return sse_response(vec![
-                sse::frame(&sse::init(
-                    uuid::Uuid::new_v4().to_string(),
-                    uuid::Uuid::new_v4().to_string(),
-                )),
-                sse::frame(&sse::finished_error(format!(
-                    "failed to decode request protobuf: {e}"
-                ))),
-            ]);
-        }
+/// turn, and stream the resulting `ResponseEvent`s back as SSE frames. Both the
+/// decode and the framing are [`wire`]'s job.
+async fn handle_multi_agent(headers: HeaderMap, body: Bytes) -> Response {
+    let (request, auth_header_api_key) = match wire::decode_request(&body, &headers) {
+        Ok(parsed) => parsed,
+        Err(response) => return response,
     };
-
     let client = reqwest::Client::new();
     let events = run_turn(&client, request, auth_header_api_key).await;
-    let frames = events.iter().map(sse::frame).collect();
-    sse_response(frames)
+    wire::encode_events(&events)
 }
 
 /// Minimal GraphQL surface. The client polls a few queries (model choices,
@@ -169,15 +150,4 @@ async fn handle_graphql(body: Bytes) -> Response {
 /// etc.) gets an empty-object 200 so the client treats it as a successful no-op.
 async fn handle_fallback() -> Response {
     Json(json!({})).into_response()
-}
-
-/// Builds an SSE response from pre-rendered frames.
-fn sse_response(frames: Vec<String>) -> Response {
-    let body: String = frames.concat();
-    Response::builder()
-        .status(StatusCode::OK)
-        .header("content-type", "text/event-stream")
-        .header("cache-control", "no-cache")
-        .body(Body::from(body))
-        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }

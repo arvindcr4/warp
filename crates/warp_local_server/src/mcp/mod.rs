@@ -163,5 +163,4 @@ fn json_to_prost_value(value: &Value) -> prost_types::Value {
 }
 
 #[cfg(test)]
-#[path = "mcp_tests.rs"]
 mod tests;
