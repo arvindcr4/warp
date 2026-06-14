@@ -10,9 +10,15 @@ fn main() -> anyhow::Result<()> {
     println!("cargo:rerun-if-changed=js/tsconfig.json");
 
     if let Err(e) = build_command_signatures() {
-        if !Path::new(format!("{}/js/build", env!("CARGO_MANIFEST_DIR")).as_str()).exists() {
-            panic!(
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let js_dir = format!("{manifest_dir}/js");
+        let build_dir = format!("{manifest_dir}/js/build");
+        if !Path::new(&build_dir).exists() {
+            eprintln!(
                 r#"Failed to build command signatures JS: {e:?}.
+
+Attempted to build at: {js_dir}
+Expected output at: {build_dir}
 
 Most likely, this is fixed by:
     1) Ensuring you have an up-to-date Node version; 18.14.1 (required for warp-server development) should suffice.
@@ -22,7 +28,8 @@ Most likely, this is fixed by:
 
 If you continue to encounter issues, ensure you don't have conflicting Node installations, one of which might not be a sufficiently recent version.
 "#
-            )
+            );
+            std::process::exit(1);
         } else {
             println!("cargo:warning=Failed to build command signatures JS. Proceeding with stale command signatures!");
         }

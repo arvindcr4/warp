@@ -4,6 +4,7 @@ use std::ffi::c_void;
 use std::path::Path;
 use std::ptr;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -491,6 +492,14 @@ pub struct WindowState {
     executor: Rc<executor::Foreground>,
     ime_active: Cell<bool>,
     pub(super) capture_callback: RefCell<Option<FrameCaptureCallback>>,
+    /// Set to `true` at the start of `warp_dealloc_window` so that any
+    /// late-arriving AppKit callbacks (e.g. a view event dispatched after
+    /// the NSWindow has been deallocated) can early-return instead of
+    /// dereferencing a `Box<Rc<WindowState>>` whose `Rc` was already
+    /// dropped. AppKit dispatches a few events on the main thread
+    /// concurrently with the final dealloc; without this guard, those
+    /// callbacks would double-drop the inner `Rc<RefCell<...>>`s.
+    is_being_deallocated: AtomicBool,
 }
 
 impl Window {
@@ -621,6 +630,7 @@ impl Window {
                 executor,
                 ime_active: Cell::new(false),
                 capture_callback: RefCell::new(None),
+                is_being_deallocated: AtomicBool::new(false),
             });
 
             // Store a +1 reference to the window state in the window, its content
@@ -1259,7 +1269,11 @@ extern "C-unwind" fn warp_view_did_change_backing_properties(this: &Object, asyn
     // SAFETY: `this` is a WarpHostView carrying the window-state ivar; its backing
     // layer is always a CAMetalLayer.
     let (window, layer) = unsafe {
-        let window = get_window_state(this);
+        // Bail out if the window is mid-dealloc; AppKit can dispatch a final
+        // backing-change event after the NSWindow has been deallocated.
+        let Some(window) = get_window_state_if_alive(this) else {
+            return;
+        };
         let view = &*(this as *const Object).cast::<NSView>();
         let layer = view
             .layer()
@@ -1309,7 +1323,9 @@ extern "C-unwind" fn warp_view_did_change_backing_properties(this: &Object, asyn
 
 #[no_mangle]
 pub extern "C-unwind" fn warp_get_accessibility_contents(object: &mut Object) -> id {
-    let state = unsafe { get_window_state(object) };
+    let Some(state) = (unsafe { get_window_state_if_alive(&*object) }) else {
+        return ptr::null_mut();
+    };
     let window_id = state.window_id;
     let accessibility_data = app::callback_dispatcher()
         .with_mutable_app_context(|app| app.focused_view_accessibility_data(window_id));
@@ -1323,7 +1339,12 @@ pub extern "C-unwind" fn warp_get_accessibility_contents(object: &mut Object) ->
 
 #[no_mangle]
 pub extern "C-unwind" fn warp_ime_position(object: &mut Object, content_rect: NSRect) -> NSRect {
-    let state = unsafe { get_window_state(object) };
+    let Some(state) = (unsafe { get_window_state_if_alive(&*object) }) else {
+        return NSRect {
+            origin: NSPoint::new(0., 0.),
+            size: NSSize::new(0., 0.),
+        };
+    };
 
     let cursor_info = app::callback_dispatcher()
         .for_window(&Window(state.clone()))
@@ -1355,7 +1376,11 @@ extern "C-unwind" fn warp_view_set_frame_size(this: &Object, size: NSSize, async
     // SAFETY: `this` is a WarpHostView carrying the window-state ivar; its backing
     // layer is always a CAMetalLayer.
     let (window, layer) = unsafe {
-        let window = get_window_state(this);
+        // Bail out if the window is mid-dealloc; AppKit can dispatch a final
+        // resize event after the NSWindow has been deallocated.
+        let Some(window) = get_window_state_if_alive(this) else {
+            return;
+        };
         let view = &*(this as *const Object).cast::<NSView>();
         let layer = view
             .layer()
@@ -1409,7 +1434,11 @@ extern "C-unwind" fn warp_update_layer(this: &Object) {
     }
 
     unsafe {
-        let window = get_window_state(this);
+        // Bail out if the window is mid-dealloc; AppKit can dispatch a final
+        // display event after the NSWindow has been deallocated.
+        let Some(window) = get_window_state_if_alive(this) else {
+            return;
+        };
 
         let scene = {
             if window.next_scene.borrow().is_none() {
@@ -1466,7 +1495,11 @@ extern "C-unwind" fn warp_handle_view_event(
     native_event: id,
     composing_state: bool,
 ) -> bool {
-    let window = unsafe { get_window_state(this) };
+    // Bail out if the window is mid-dealloc; AppKit can dispatch a final
+    // view event after the NSWindow has been deallocated.
+    let Some(window) = (unsafe { get_window_state_if_alive(this) }) else {
+        return false;
+    };
     let event = unsafe {
         super::event::from_native(
             native_event,
@@ -1657,6 +1690,16 @@ pub extern "C-unwind" fn warp_dealloc_window(native_window: &mut Object) {
     // SAFETY: `native_window` is a WarpWindow being deallocated; its content view
     // and delegate both carry the window-state ivar.
     unsafe {
+        // Mark the state as deallocating *before* we tear down the ivars so
+        // that any concurrent AppKit callback (e.g. a final view event)
+        // sees the flag and early-returns instead of dereferencing the
+        // soon-to-be-dangling `Box<Rc<WindowState>>` pointer.
+        let window_state = get_window_state(&*native_window);
+        window_state
+            .is_being_deallocated
+            .store(true, Ordering::SeqCst);
+
+        let window = &*(native_window as *const Object).cast::<NSWindow>();
         let window = &*(native_window as *const Object).cast::<NSWindow>();
 
         // Remove the window state from the content NSView and drop a reference.
@@ -1687,6 +1730,23 @@ pub extern "C-unwind" fn warp_dealloc_window(native_window: &mut Object) {
 pub unsafe fn get_window_state(object: &Object) -> &Rc<WindowState> {
     let wrapper_ptr: *mut c_void = *object.get_ivar(WINDOW_STATE_IVAR);
     Ivar::get_state(wrapper_ptr)
+}
+
+/// Look up the window state for an Objective-C callback target, returning
+/// `None` if the state is in the middle of being deallocated.
+///
+/// AppKit dispatches a handful of callbacks on the main thread
+/// concurrently with the final `dealloc` of the NSWindow. If we dereferenced
+/// the ivar in that window, the inner `Rc<RefCell<...>>`s would be dropped a
+/// second time. Use this from every `extern "C-unwind"` callback that takes
+/// a view/window/delegate pointer, and early-return when it yields `None`.
+pub unsafe fn get_window_state_if_alive<'a>(object: &Object) -> Option<&'a Rc<WindowState>> {
+    let state = get_window_state(object);
+    if state.is_being_deallocated.load(Ordering::SeqCst) {
+        None
+    } else {
+        Some(state)
+    }
 }
 
 fn schedule_synthetic_drag(

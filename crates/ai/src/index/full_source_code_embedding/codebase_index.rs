@@ -420,7 +420,7 @@ impl CodebaseIndex {
         embedding_generation_batch_size: usize,
         ctx: &mut ModelContext<Self>,
     ) -> Self {
-        let (sync_progress_tx, sync_progress_rx) = async_channel::unbounded();
+        let (sync_progress_tx, sync_progress_rx) = async_channel::bounded(64);
 
         let _ = ctx.spawn_stream_local(
             sync_progress_rx,

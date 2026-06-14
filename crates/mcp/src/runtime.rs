@@ -24,8 +24,12 @@ type ReqwestSseTransport = crate::sse_transport::SseClientTransport<reqwest::Cli
 
 /// Known-safe MCP server command binary names (allowlisted for process spawning).
 ///
-/// Commands not in this list will still be spawned for backwards compatibility,
-/// but a warning will be logged so operators can audit unexpected binaries.
+/// Commands NOT in this list are HARD-blocked: the MCP server will refuse to
+/// spawn an unlisted binary even if the user has execute permission for it.
+/// This is the security boundary against a malicious MCP template launching
+/// arbitrary processes. Add new entries here after a security review of the
+/// binary's trust model.
+///
 /// Commands containing shell metacharacters are unconditionally rejected.
 const ALLOWLISTED_MCP_COMMANDS: &[&str] = &[
     "npx",      // Node.js package runner (most common MCP server launcher)
@@ -39,6 +43,13 @@ const ALLOWLISTED_MCP_COMMANDS: &[&str] = &[
     "go",
 ];
 
+/// Static env-var names that may be passed through to the MCP child process.
+/// Anything else is filtered out to prevent leaking arbitrary secrets from
+/// the parent environment into an attacker-controlled child.
+const ALLOWED_STATIC_ENV_VARS: &[&str] = &[
+    "PATH", "HOME", "USER", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR", "TEMP", "TMP",
+];
+
 /// Returns `true` if `command` contains shell metacharacters that could be used
 /// for argument injection when passed through `cmd.exe /c` or similar wrappers.
 fn contains_shell_metacharacters(command: &str) -> bool {
@@ -48,9 +59,9 @@ fn contains_shell_metacharacters(command: &str) -> bool {
 /// Validate that `command` is safe to spawn as an MCP server child process.
 ///
 /// 1. Rejects commands containing shell metacharacters (hard block).
-/// 2. Logs a warning if the binary name is not in [`ALLOWLISTED_MCP_COMMANDS`].
+/// 2. Hard-blocks binaries not in [`ALLOWLISTED_MCP_COMMANDS`].
 ///
-/// Returns `true` if the command passes validation (or is merely unlisted).
+/// Returns `true` if the command passes validation.
 fn validate_mcp_command(command: &str, logger: &SimpleLogger) -> bool {
     // Hard block: shell metacharacters are never acceptable.
     if contains_shell_metacharacters(command) {
@@ -66,13 +77,15 @@ fn validate_mcp_command(command: &str, logger: &SimpleLogger) -> bool {
         .and_then(|n| n.to_str())
         .unwrap_or(command);
 
-    // Warn-but-allow for unlisted commands (backwards compatible).
+    // Hard block: unlisted binaries cannot be spawned.
     if !ALLOWLISTED_MCP_COMMANDS.contains(&binary_name) {
         logger.log(format!(
-            "[warn] MCP: Command '{binary_name}' is not in the allowlist of \
-             known-safe MCP server binaries. Known-safe: {}",
+            "[error] MCP: Rejected command '{binary_name}' — not in the allowlist of \
+             known-safe MCP server binaries. Known-safe: {}. Add the binary to \
+             ALLOWLISTED_MCP_COMMANDS in crates/mcp/src/runtime.rs after a security review.",
             ALLOWLISTED_MCP_COMMANDS.join(", "),
         ));
+        return false;
     }
 
     true
@@ -271,9 +284,9 @@ pub async fn spawn_server(
                             std::io::ErrorKind::InvalidInput,
                             format!(
                                 "MCP server command was rejected by security validation: \
-                                 '{cmd_to_validate}' contains shell metacharacters. \
-                                 If this is a legitimate MCP server command, add it to the \
-                                 allowlist in crates/mcp/src/runtime.rs."
+                                 '{cmd_to_validate}'. If this is a legitimate MCP server \
+                                 command, add it to ALLOWLISTED_MCP_COMMANDS in \
+                                 crates/mcp/src/runtime.rs after a security review."
                             ),
                         ),
                     ));
@@ -297,6 +310,14 @@ pub async fn spawn_server(
                             // Skip empty/unset environment variables so that, in the CLI, they can be inherited.
                             logger.log(format!(
                                 "[warn] MCP: Skipping empty environment variable: {name}"
+                            ));
+                            continue;
+                        }
+                        // Restrict to a small named allowlist so an attacker can't
+                        // smuggle arbitrary secrets from the parent env into the child.
+                        if !ALLOWED_STATIC_ENV_VARS.contains(&name.as_str()) {
+                            logger.log(format!(
+                                "[warn] MCP: Skipping non-allowlisted environment variable: {name}"
                             ));
                             continue;
                         }

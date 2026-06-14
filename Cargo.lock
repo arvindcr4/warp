@@ -558,6 +558,7 @@ dependencies = [
  "reqwest",
  "serde_json",
  "tokio",
+ "url",
 ]
 
 [[package]]
@@ -15144,6 +15145,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "futures",
+ "log",
  "prost",
  "prost-types",
  "reqwest",
@@ -15560,6 +15562,7 @@ dependencies = [
  "similar",
  "simplelog",
  "smallvec 1.15.1",
+ "static_assertions",
  "string-offset",
  "strum",
  "strum_macros",

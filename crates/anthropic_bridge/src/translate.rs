@@ -145,8 +145,13 @@ pub fn openai_to_anthropic(body: &Value) -> Result<Value, String> {
                 if let Some(tool_calls) = message["tool_calls"].as_array() {
                     for call in tool_calls {
                         let arguments = call["function"]["arguments"].as_str().unwrap_or("{}");
-                        let input: Value =
-                            serde_json::from_str(arguments).unwrap_or_else(|_| json!({}));
+                        let input: Value = serde_json::from_str(arguments).unwrap_or_else(|e| {
+                            log::debug!(
+                                "Failed to parse tool_call arguments as JSON: {e}; \
+                                 arguments were: {arguments}"
+                            );
+                            json!({})
+                        });
                         blocks.push(json!({
                             "type": "tool_use",
                             "id": call["id"].as_str().unwrap_or_default(),
@@ -533,8 +538,11 @@ impl SseTranslator {
                 continue;
             }
             let joined = data_lines.join("\n");
-            if let Ok(value) = serde_json::from_str::<Value>(&joined) {
-                out.extend(self.process_event(&value));
+            match serde_json::from_str::<Value>(&joined) {
+                Ok(value) => out.extend(self.process_event(&value)),
+                Err(e) => log::debug!(
+                    "Failed to parse SSE event payload as JSON: {e}; payload was: {joined}"
+                ),
             }
         }
         out

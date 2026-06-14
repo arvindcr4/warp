@@ -74,6 +74,16 @@ struct TrustedWindow {
 // moving to wgpu 0.19 (an important migration for the Linux target), so we're
 // doing this and covering our eyes for now, with the intention of fixing it or
 // removing support for `wpgu` in our macOS backend.
+//
+// Hard-fail any build that combines the experimental wgpu macOS backend with
+// the release_bundle profile. The unsound `Send`/`Sync` impls below would
+// otherwise be eligible for shipping to end users, where a use-after-free
+// could be triggered by a deallocation race on the underlying NSView.
+#[cfg(all(feature = "experimental-wgpu-renderer", release_bundle))]
+compile_error!(
+    "experimental-wgpu-renderer must NEVER be enabled in release_bundle builds; \
+     the unsafe Send/Sync impls in TrustedWindow are unsound and will be removed."
+);
 unsafe impl Send for TrustedWindow {}
 unsafe impl Sync for TrustedWindow {}
 

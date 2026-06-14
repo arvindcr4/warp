@@ -779,10 +779,12 @@ mod origin_tests {
     fn server_and_rtc_origins_match() {
         // Derive the expected origins from `ChannelState` so the assertion holds
         // regardless of which channel config the test build resolves to.
-        let server = reqwest::Url::parse(ChannelState::server_root_url().as_ref()).unwrap();
+        let server = reqwest::Url::parse(ChannelState::server_root_url().as_ref())
+            .expect("ChannelState::server_root_url() must return a valid URL");
         assert!(is_warp_server_origin(&server.join("/graphql/v2").unwrap()));
 
-        let rtc = reqwest::Url::parse(ChannelState::rtc_http_url().as_ref()).unwrap();
+        let rtc = reqwest::Url::parse(ChannelState::rtc_http_url().as_ref())
+            .expect("ChannelState::rtc_http_url() must return a valid URL");
         assert!(is_warp_server_origin(
             &rtc.join("/api/v1/agent/events/stream").unwrap()
         ));
@@ -790,7 +792,8 @@ mod origin_tests {
 
     #[test]
     fn third_party_origin_does_not_match() {
-        let url = reqwest::Url::parse("https://evil.example.com/graphql/v2").unwrap();
+        let url = reqwest::Url::parse("https://evil.example.com/graphql/v2")
+            .expect("hard-coded test URL must parse");
         assert!(!is_warp_server_origin(&url));
     }
 }

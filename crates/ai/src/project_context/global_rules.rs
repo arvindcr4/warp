@@ -108,7 +108,8 @@ impl GlobalRules {
         };
 
         // Set up the channel that all per-source subscribers push into.
-        let (tx, rx) = async_channel::unbounded::<GlobalRulesUpdate>();
+        // Bounded to apply backpressure on producers if the consumer stalls.
+        let (tx, rx) = async_channel::bounded::<GlobalRulesUpdate>(64);
         self.updates_tx = Some(tx);
 
         ctx.spawn_stream_local(

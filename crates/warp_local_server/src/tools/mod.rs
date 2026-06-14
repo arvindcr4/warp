@@ -44,7 +44,12 @@ pub fn openai_tool_call_to_warp(
     mcp: &McpRegistry,
 ) -> Option<api::Message> {
     use api::message::tool_call::Tool;
-    let args: Value = serde_json::from_str(arguments).unwrap_or_else(|_| json!({}));
+    let args: Value = serde_json::from_str(arguments).unwrap_or_else(|e| {
+        log::debug!(
+            "Failed to parse tool call arguments as JSON: {e}; arguments were: {arguments}"
+        );
+        json!({})
+    });
 
     let tool = if let Some(builtin) = builtin_tools().iter().find(|t| t.name() == name) {
         builtin.to_warp(&args)

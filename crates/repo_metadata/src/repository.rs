@@ -570,7 +570,10 @@ where
         repository: &Repository,
         ctx: &mut ModelContext<Repository>,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> {
-        self.inner.lock().unwrap().on_scan(repository, ctx)
+        self.inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .on_scan(repository, ctx)
     }
 
     fn on_files_updated(
@@ -580,7 +583,7 @@ where
         ctx: &mut ModelContext<Repository>,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> {
         {
-            let mut st = self.state.lock().unwrap();
+            let mut st = self.state.lock().unwrap_or_else(|poison| poison.into_inner());
             merge_repository_updates(&mut st.pending, update);
             st.version = st.version.wrapping_add(1);
 
@@ -596,7 +599,9 @@ where
                         loop {
                             // Capture current version, then wait.
                             let start_version = {
-                                let st = state.lock().unwrap();
+                                let st = state
+                                    .lock()
+                                    .unwrap_or_else(|poison| poison.into_inner());
                                 st.version
                             };
                             warpui_core::r#async::Timer::after(wait).await;
@@ -606,7 +611,9 @@ where
                                 // Yield before flushing to check if the current flush is cancelled.
                                 futures_lite::future::yield_now().await;
 
-                                let mut st = state.lock().unwrap();
+                                let mut st = state
+                                    .lock()
+                                    .unwrap_or_else(|poison| poison.into_inner());
                                 if st.version == start_version {
                                     st.flush_handle = None;
                                     Some(std::mem::take(&mut st.pending))

@@ -80,3 +80,71 @@ pub fn init(app: &mut warpui_core::AppContext) {
     agent_onboarding_view::init(app);
     callout::init(app);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn onboarding_intention_display_is_stable() {
+        assert_eq!(OnboardingIntention::Terminal.to_string(), "terminal");
+        assert_eq!(
+            OnboardingIntention::AgentDrivenDevelopment.to_string(),
+            "agent_driven"
+        );
+    }
+
+    #[test]
+    fn ai_features_is_non_empty_and_dedup() {
+        assert!(!AI_FEATURES.is_empty(), "AI_FEATURES must not be empty");
+        let unique: std::collections::HashSet<_> = AI_FEATURES.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            AI_FEATURES.len(),
+            "AI_FEATURES must not contain duplicates: {:?}",
+            AI_FEATURES
+        );
+    }
+
+    #[test]
+    fn warp_drive_features_is_non_empty_and_dedup() {
+        assert!(
+            !WARP_DRIVE_FEATURES.is_empty(),
+            "WARP_DRIVE_FEATURES must not be empty"
+        );
+        let unique: std::collections::HashSet<_> = WARP_DRIVE_FEATURES.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            WARP_DRIVE_FEATURES.len(),
+            "WARP_DRIVE_FEATURES must not contain duplicates: {:?}",
+            WARP_DRIVE_FEATURES
+        );
+    }
+
+    #[test]
+    fn feature_lists_disjoint() {
+        for ai in AI_FEATURES {
+            assert!(
+                !WARP_DRIVE_FEATURES.contains(ai),
+                "{ai:?} appears in both AI_FEATURES and WARP_DRIVE_FEATURES",
+            );
+        }
+    }
+
+    #[test]
+    fn session_default_display() {
+        assert_eq!(SessionDefault::Agent.to_string(), "agent");
+        assert_eq!(SessionDefault::Terminal.to_string(), "terminal");
+        assert_eq!(SessionDefault::default(), SessionDefault::Agent);
+    }
+
+    #[cfg(feature = "bin")]
+    #[test]
+    fn mock_telemetry_context_provider_registers_in_module() {
+        // Compile-only check: MockTelemetryContextProvider is only available behind
+        // `feature = "bin"` and must be re-exported from this crate.
+        use warp_core::telemetry::TelemetryContextProvider as _;
+        fn _assert_provider<T: TelemetryContextProvider>() {}
+        _assert_provider::<MockTelemetryContextProvider>();
+    }
+}

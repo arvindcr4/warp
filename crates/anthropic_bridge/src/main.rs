@@ -35,20 +35,115 @@ use crate::translate::{
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 
+/// Comma-separated list of upstream hostnames the bridge is permitted to
+/// forward requests to. Configured via `BRIDGE_ALLOWED_UPSTREAM_HOSTS`; if
+/// unset, defaults to the MiniMax Token Plan endpoint used by Warp.
+fn allowed_upstream_hosts() -> Vec<String> {
+    if let Ok(raw) = std::env::var("BRIDGE_ALLOWED_UPSTREAM_HOSTS") {
+        raw.split(',')
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect()
+    } else {
+        vec!["api.minimax.io".to_string()]
+    }
+}
+
 fn http_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(reqwest::Client::new)
 }
 
-/// Decodes the URL-safe base64 path segment back into the target base URL.
+/// Returns true if `host` (which may be a bare hostname, an IPv4 address, or
+/// an IPv6 address) falls into any private / loopback / link-local / cloud
+/// metadata range. Used to keep the bridge from relaying requests into the
+/// host's own network.
+fn is_disallowed_host(host: &str) -> bool {
+    let lower = host.to_lowercase();
+    if lower == "localhost" || lower.ends_with(".localhost") || lower.ends_with(".local") {
+        return true;
+    }
+    // Cloud metadata endpoints and other well-known internal hostnames.
+    if lower == "metadata.google.internal"
+        || lower == "metadata"
+        || lower.ends_with(".internal")
+    {
+        return true;
+    }
+    // IPv4: parse the four octets and check the IANA special-purpose ranges.
+    if let Some(ip) = parse_ipv4(&lower) {
+        let [a, b, _, _] = ip;
+        if ip == [0, 0, 0, 0]
+            || a == 10
+            || a == 127
+            || (a == 169 && b == 254)
+            || (a == 172 && (16..=31).contains(&b))
+            || (a == 192 && b == 168)
+            || a >= 240
+        {
+            return true;
+        }
+        return false;
+    }
+    // IPv6 (very loose): bracketed or not, but treat loopback, link-local,
+    // unique-local, and unspecified as disallowed.
+    if let Some(ip) = parse_ipv6(&lower) {
+        if ip.is_loopback() || ip.is_unspecified() || ip.is_link_local() || ip.is_unique_local() {
+            return true;
+        }
+        return false;
+    }
+    // Anything that isn't a recognizable IP is a hostname; the allowlist will
+    // gate it below.
+    false
+}
+
+fn parse_ipv4(s: &str) -> Option<[u8; 4]> {
+    let mut parts = s.split('.');
+    let mut out = [0u8; 4];
+    for octet in &mut out {
+        let p = parts.next()?;
+        if p.is_empty() || p.len() > 3 {
+            return None;
+        }
+        let v: u32 = p.parse().ok()?;
+        if v > 255 {
+            return None;
+        }
+        *octet = v as u8;
+    }
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(out)
+}
+
+fn parse_ipv6(s: &str) -> Option<std::net::Ipv6Addr> {
+    s.parse::<std::net::Ipv6Addr>().ok()
+}
+
+/// Decodes the URL-safe base64 path segment back into the target base URL,
+/// applies an SSRF allowlist (scheme = https only, host must be permitted
+/// and not a private/loopback/link-local address), and returns the
+/// canonicalized target.
 fn decode_target(encoded: &str) -> Option<String> {
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(encoded)
         .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(encoded))
         .ok()?;
     let target = String::from_utf8(bytes).ok()?;
-    (target.starts_with("https://") || target.starts_with("http://"))
-        .then(|| target.trim_end_matches('/').to_string())
+    if !target.starts_with("https://") {
+        return None;
+    }
+    let parsed = url::Url::parse(&target).ok()?;
+    let host = parsed.host_str()?.to_lowercase();
+    if is_disallowed_host(&host) {
+        return None;
+    }
+    if !allowed_upstream_hosts().iter().any(|h| h == &host) {
+        return None;
+    }
+    Some(target.trim_end_matches('/').to_string())
 }
 
 fn error_response(status: StatusCode, message: &str) -> Response {
@@ -82,7 +177,7 @@ async fn handle_post(
     let Some(target) = decode_target(&target) else {
         return error_response(
             StatusCode::BAD_REQUEST,
-            "invalid target: expected URL-safe base64 of an http(s) base URL",
+            "invalid target: expected URL-safe base64 of an https base URL whose host is on the allowlist",
         );
     };
     let Some(auth) = headers

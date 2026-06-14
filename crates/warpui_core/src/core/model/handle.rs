@@ -103,8 +103,15 @@ impl<T> Debug for ModelHandle<T> {
     }
 }
 
-unsafe impl<T> Send for ModelHandle<T> {}
-unsafe impl<T> Sync for ModelHandle<T> {}
+// SAFETY: `ModelHandle<T>` only contains `EntityId` (Copy), `PhantomData<T>`,
+// and `Weak<Mutex<RefCounts>>`. `PhantomData<T>` is `Send + Sync` iff `T` is
+// `Send + Sync`; `EntityId` and `Weak<Mutex<RefCounts>>` are already
+// `Send + Sync`. We require `T: Send + Sync` so that any non-`Send`/`!Sync`
+// internals of `T` (the `Entity` trait gives implementers full freedom) cannot
+// be smuggled across threads through the handle. If `T` itself is `!Send` or
+// `!Sync`, the impls below simply don't apply.
+unsafe impl<T: Send + Sync> Send for ModelHandle<T> {}
+unsafe impl<T: Send + Sync> Sync for ModelHandle<T> {}
 
 impl<T> Drop for ModelHandle<T> {
     fn drop(&mut self) {

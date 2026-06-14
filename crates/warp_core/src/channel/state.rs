@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 use std::collections::HashSet;
+use std::sync::OnceLock;
 
-use lazy_static::lazy_static;
 use parking_lot::Mutex;
 use url::{Origin, ParseError, Url};
 
@@ -13,15 +13,32 @@ use crate::channel::config::{
 use crate::features::FeatureFlag;
 use crate::AppId;
 
-lazy_static! {
-    static ref CHANNEL_STATE: Mutex<ChannelState> = Mutex::new(ChannelState::init());
+// Migrated from `lazy_static!` to `std::sync::OnceLock`: same one-time
+// initialization semantics with no macro magic, no internal Mutex, and no
+// risk of conflating lock-poisoning (parking_lot is not poisoned) with
+// initialization. Accessor wrappers preserve the previous `FOO.lock()` call
+// style at use sites without dragging the OnceLock into every call site.
+fn channel_state() -> &'static Mutex<ChannelState> {
+    static CELL: OnceLock<Mutex<ChannelState>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(ChannelState::init()))
 }
 
 #[cfg(feature = "test-util")]
-lazy_static! {
-    static ref MOCK_SERVER: mockito::ServerGuard = mockito::Server::new();
-    static ref MOCK_SERVER_URL: String = MOCK_SERVER.url();
-    static ref APP_VERSION: Mutex<Option<&'static str>> = Mutex::new(None);
+fn mock_server() -> &'static mockito::ServerGuard {
+    static CELL: OnceLock<mockito::ServerGuard> = OnceLock::new();
+    CELL.get_or_init(mockito::Server::new)
+}
+
+#[cfg(feature = "test-util")]
+fn mock_server_url() -> &'static String {
+    static CELL: OnceLock<String> = OnceLock::new();
+    CELL.get_or_init(|| mock_server().url())
+}
+
+#[cfg(feature = "test-util")]
+fn app_version() -> &'static Mutex<Option<&'static str>> {
+    static CELL: OnceLock<Mutex<Option<&'static str>>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(None))
 }
 
 #[derive(Debug)]
@@ -71,7 +88,7 @@ impl ChannelState {
     }
 
     pub fn set(state: ChannelState) {
-        *CHANNEL_STATE.lock() = state;
+        *channel_state().lock() = state;
     }
 
     pub fn is_release_bundle() -> bool {
@@ -85,14 +102,14 @@ impl ChannelState {
     pub fn override_server_root_url(url: impl Into<Cow<'static, str>>) -> Result<(), ParseError> {
         let url = url.into();
         Url::parse(&url)?;
-        CHANNEL_STATE.lock().config.server_config.server_root_url = url;
+        channel_state().lock().config.server_config.server_root_url = url;
         Ok(())
     }
 
     pub fn override_ws_server_url(url: impl Into<Cow<'static, str>>) -> Result<(), ParseError> {
         let url = url.into();
         Url::parse(&url)?;
-        CHANNEL_STATE.lock().config.server_config.rtc_server_url = url;
+        channel_state().lock().config.server_config.rtc_server_url = url;
         Ok(())
     }
 
@@ -101,7 +118,7 @@ impl ChannelState {
     ) -> Result<(), ParseError> {
         let url = url.into();
         Url::parse(&url)?;
-        CHANNEL_STATE
+        channel_state()
             .lock()
             .config
             .server_config
@@ -121,7 +138,7 @@ impl ChannelState {
     /// This should not be used for namespacing persisted data - such use cases
     /// should make use of [`Self::data_domain`] instead.
     pub fn app_id() -> AppId {
-        CHANNEL_STATE.lock().config.app_id.clone()
+        channel_state().lock().config.app_id.clone()
     }
 
     /// Returns a profile name for isolating user data. This should be used to
@@ -155,7 +172,7 @@ impl ChannelState {
     }
 
     pub fn additional_features() -> HashSet<FeatureFlag> {
-        CHANNEL_STATE
+        channel_state()
             .lock()
             .additional_features
             .iter()
@@ -164,15 +181,15 @@ impl ChannelState {
     }
 
     pub fn debug_str() -> String {
-        format!("{:?}", *CHANNEL_STATE.lock())
+        format!("{:?}", *channel_state().lock())
     }
 
     pub fn logfile_name() -> Cow<'static, str> {
-        CHANNEL_STATE.lock().config.logfile_name.clone()
+        channel_state().lock().config.logfile_name.clone()
     }
 
     pub fn telemetry_file_name() -> Cow<'static, str> {
-        CHANNEL_STATE
+        channel_state()
             .lock()
             .config
             .telemetry_config
@@ -186,7 +203,7 @@ impl ChannelState {
     /// `telemetry_config: None`, in which case UI that controls telemetry
     /// should be hidden since the toggle has no effect.
     pub fn is_telemetry_available() -> bool {
-        CHANNEL_STATE.lock().config.telemetry_config.is_some()
+        channel_state().lock().config.telemetry_config.is_some()
     }
 
     /// Returns whether this build has a crash reporting config and can therefore
@@ -194,11 +211,11 @@ impl ChannelState {
     /// `crash_reporting_config: None`, in which case UI that controls crash
     /// reporting should be hidden since the toggle has no effect.
     pub fn is_crash_reporting_available() -> bool {
-        CHANNEL_STATE.lock().config.crash_reporting_config.is_some()
+        channel_state().lock().config.crash_reporting_config.is_some()
     }
 
     pub fn releases_base_url() -> Cow<'static, str> {
-        CHANNEL_STATE
+        channel_state()
             .lock()
             .config
             .autoupdate_config
@@ -208,7 +225,7 @@ impl ChannelState {
     }
 
     pub fn firebase_api_key() -> Cow<'static, str> {
-        CHANNEL_STATE
+        channel_state()
             .lock()
             .config
             .server_config
@@ -217,11 +234,11 @@ impl ChannelState {
     }
 
     pub fn iap_config() -> Option<IapConfig> {
-        CHANNEL_STATE.lock().config.server_config.iap_config.clone()
+        channel_state().lock().config.server_config.iap_config.clone()
     }
 
     pub fn ws_server_url() -> Cow<'static, str> {
-        CHANNEL_STATE
+        channel_state()
             .lock()
             .config
             .server_config
@@ -240,7 +257,7 @@ impl ChannelState {
     pub fn rtc_http_url() -> Cow<'static, str> {
         cfg_if::cfg_if! {
             if #[cfg(feature = "test-util")] {
-                Cow::Owned(MOCK_SERVER_URL.clone())
+                Cow::Owned(mock_server_url().clone())
             } else {
                 match derive_http_origin_from_ws_url(&Self::ws_server_url()) {
                     Some(origin) => Cow::Owned(origin),
@@ -255,27 +272,27 @@ impl ChannelState {
             if #[cfg(feature = "test-util")] {
                 Some(Cow::Borrowed("fake_session_sharing_url"))
             } else {
-                CHANNEL_STATE.lock().config.server_config.session_sharing_server_url.clone()
+                channel_state().lock().config.server_config.session_sharing_server_url.clone()
             }
         }
     }
 
     pub fn oz_root_url() -> Cow<'static, str> {
-        CHANNEL_STATE.lock().config.oz_config.oz_root_url.clone()
+        channel_state().lock().config.oz_config.oz_root_url.clone()
     }
 
     pub fn server_root_url() -> Cow<'static, str> {
         cfg_if::cfg_if! {
             if #[cfg(feature = "test-util")] {
-                Cow::Owned(MOCK_SERVER_URL.clone())
+                Cow::Owned(mock_server_url().clone())
             } else {
-                CHANNEL_STATE.lock().config.server_config.server_root_url.clone()
+                channel_state().lock().config.server_config.server_root_url.clone()
             }
         }
     }
 
     pub fn workload_audience_url() -> Cow<'static, str> {
-        let state = CHANNEL_STATE.lock();
+        let state = channel_state().lock();
         match &state.config.oz_config.workload_audience_url {
             Some(url) => url.clone(),
             None => {
@@ -294,7 +311,7 @@ impl ChannelState {
 
     /// Returns the rudderstack destination for all events that don't contain user-generated content.
     pub fn rudderstack_non_ugc_destination() -> RudderStackDestination {
-        let state = CHANNEL_STATE.lock();
+        let state = channel_state().lock();
 
         state
             .config
@@ -307,7 +324,7 @@ impl ChannelState {
 
     /// Returns the rudderstack destination for all events that contain user-generated content.
     pub fn rudderstack_ugc_destination() -> RudderStackDestination {
-        let state = CHANNEL_STATE.lock();
+        let state = channel_state().lock();
 
         state
             .config
@@ -319,19 +336,19 @@ impl ChannelState {
     }
 
     pub fn channel() -> Channel {
-        CHANNEL_STATE.lock().channel
+        channel_state().lock().channel
     }
 
     #[cfg(feature = "test-util")]
     pub fn app_version() -> Option<&'static str> {
-        let version = APP_VERSION.lock();
+        let version = app_version().lock();
 
         version.or_else(|| option_env!("GIT_RELEASE_TAG"))
     }
 
     #[cfg(feature = "test-util")]
     pub fn set_app_version(version: Option<&'static str>) {
-        *APP_VERSION.lock() = version;
+        *app_version().lock() = version;
     }
 
     #[cfg(not(feature = "test-util"))]
@@ -340,7 +357,7 @@ impl ChannelState {
     }
 
     pub fn sentry_url() -> Cow<'static, str> {
-        CHANNEL_STATE
+        channel_state()
             .lock()
             .config
             .crash_reporting_config
@@ -350,7 +367,7 @@ impl ChannelState {
     }
 
     pub fn show_autoupdate_menu_items() -> bool {
-        CHANNEL_STATE
+        channel_state()
             .lock()
             .config
             .autoupdate_config
@@ -361,7 +378,7 @@ impl ChannelState {
 
     /// Returns the MCP OAuth provider config matching the given client ID, if any.
     pub fn mcp_oauth_provider_by_client_id(client_id: &str) -> Option<McpOAuthProviderConfig> {
-        CHANNEL_STATE
+        channel_state()
             .lock()
             .config
             .mcp_static_config
@@ -372,7 +389,7 @@ impl ChannelState {
 
     /// Returns the MCP OAuth provider config matching the given issuer URL, if any.
     pub fn mcp_oauth_provider_by_issuer(issuer: &str) -> Option<McpOAuthProviderConfig> {
-        CHANNEL_STATE
+        channel_state()
             .lock()
             .config
             .mcp_static_config

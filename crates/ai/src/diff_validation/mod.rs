@@ -465,15 +465,16 @@ fn deduplicate_overlapping_deltas(sorted_deltas: Vec<DiffDelta>) -> Vec<DiffDelt
     let mut result: Vec<DiffDelta> = Vec::with_capacity(sorted_deltas.len());
 
     for delta in sorted_deltas {
-        let dominated = result.last().is_some_and(|prev| {
-            delta.replacement_line_range.start < prev.replacement_line_range.end
-        });
-        if dominated {
+        let prev_range = result
+            .last()
+            .filter(|prev| delta.replacement_line_range.start < prev.replacement_line_range.end)
+            .map(|prev| prev.replacement_line_range);
+        if let Some(prev_range) = prev_range {
             log::warn!(
                 "Dropping V4A delta with overlapping range {:?} \
                  (subsumed by preceding delta with range {:?})",
                 delta.replacement_line_range,
-                result.last().unwrap().replacement_line_range,
+                prev_range,
             );
             continue;
         }

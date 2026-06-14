@@ -15,13 +15,16 @@ fn debug_enabled() -> bool {
 }
 
 /// Logs the resolved provider endpoint/model.
+///
+/// The API key length is intentionally NOT logged: it would be a side-channel
+/// that aids key fingerprinting and rotation tracking. If such a value is ever
+/// needed, gate it behind `debug_enabled()` (the `WARP_MAX_DEBUG` switch) AND
+/// wrap it in `safe_info!` from `warp_core::safe_log` so the dogfood/release
+/// distinction still applies.
 pub fn resolved_provider(provider: &Provider, custom_provider_count: usize) {
     eprintln!(
-        "warp-max-server: resolved base_url={} model={} api_key_len={} custom_providers={}",
-        provider.base_url,
-        provider.model,
-        provider.api_key.len(),
-        custom_provider_count
+        "warp-max-server: resolved base_url={} model={} custom_providers={}",
+        provider.base_url, provider.model, custom_provider_count
     );
 }
 

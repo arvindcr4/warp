@@ -134,7 +134,12 @@ pub fn group_file_contexts_for_display(
     order
         .iter()
         .map(|file_name| {
-            let ranges = groups.get(file_name).unwrap();
+            // `file_name` was just inserted into `order` together with its
+            // entry in `groups` (see the entry-or_insert above); the lookup
+            // can only miss if a future refactor breaks that coupling.
+            let ranges = groups
+                .get(file_name)
+                .expect("file_name was just inserted into groups above");
             let mut sorted = ranges.clone();
             sorted.sort_by_key(|r| (r.start, r.end));
             let locations = FileLocations {

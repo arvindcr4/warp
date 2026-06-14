@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::cmp::{Ordering, PartialEq};
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -243,7 +244,7 @@ pub struct RequestedCommandView {
 
     // Selection support for MCP tool call detail text
     mcp_content_selection_handle: SelectionHandle,
-    mcp_content_selected_text: Arc<std::sync::RwLock<Option<String>>>,
+    mcp_content_selected_text: Rc<RefCell<Option<String>>>,
 }
 
 impl RequestedCommandView {
@@ -477,7 +478,7 @@ impl RequestedCommandView {
             terminal_model,
             ai_block_view_id,
             mcp_content_selection_handle: SelectionHandle::default(),
-            mcp_content_selected_text: Arc::new(std::sync::RwLock::new(None)),
+            mcp_content_selected_text: Rc::new(RefCell::new(None)),
         }
     }
 
@@ -950,10 +951,9 @@ impl RequestedCommandView {
     /// Returns the currently selected text.
     pub fn selected_text(&self, ctx: &AppContext) -> Option<String> {
         // Check MCP content selection first, then fall back to editor selection.
-        if let Ok(mcp_selection) = self.mcp_content_selected_text.read() {
-            if mcp_selection.is_some() {
-                return mcp_selection.clone();
-            }
+        let mcp_selection = self.mcp_content_selected_text.borrow();
+        if mcp_selection.is_some() {
+            return mcp_selection.clone();
         }
         self.editor
             .as_ref()
@@ -963,8 +963,8 @@ impl RequestedCommandView {
     pub fn clear_selection(&mut self, ctx: &mut ViewContext<Self>) {
         // Clear MCP content selection if it exists, else fall back to editor selection.
         self.mcp_content_selection_handle.clear();
-        if let Ok(mut mcp_selection) = self.mcp_content_selected_text.write() {
-            *mcp_selection = None;
+        if self.mcp_content_selected_text.borrow().is_some() {
+            *self.mcp_content_selected_text.borrow_mut() = None;
         } else if let Some(editor) = &self.editor {
             editor.update(ctx, |editor, ctx| {
                 editor.clear_selection(ctx);
@@ -1464,7 +1464,7 @@ impl View for RequestedCommandView {
                 self.mcp_content_selection_handle.clone(),
                 #[allow(clippy::unwrap_used)]
                 move |selection_args, _, _| {
-                    *mcp_selected_text.write().unwrap() = selection_args.selection;
+                    *mcp_selected_text.borrow_mut() = selection_args.selection;
                 },
                 text_element,
             )

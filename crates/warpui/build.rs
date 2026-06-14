@@ -19,6 +19,9 @@ fn main() {
         // we can also use it on macOS, if enabled.
         wgpu: { any(winit, feature = "experimental-wgpu-renderer") },
         native: { not(target_family = "wasm") },
+        // Mirrors warp_core's `release_bundle` feature so we can refuse to
+        // ship the unsound wgpu-macOS backend in release builds.
+        release_bundle: { feature = "release_bundle" },
     }
 
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {

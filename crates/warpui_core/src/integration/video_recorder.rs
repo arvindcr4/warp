@@ -6,6 +6,21 @@ use image::ImageEncoder;
 #[cfg(feature = "integration_tests")]
 use instant::Instant;
 
+// Compile-time pin: `App` (and other main-thread-only types) must remain
+// `!Send`. The capture loop below captures `App` and is therefore `!Send`;
+// if `App` ever becomes `Send` (e.g. through a refactor of ModelHandle/ViewHandle)
+// the loop would silently move to a worker thread and the platform callback
+// dispatcher would misroute. This assertion fails the build if that invariant
+// is violated.
+#[cfg(feature = "integration_tests")]
+static_assertions::assert_not_impl_all!(crate::App: Send);
+#[cfg(feature = "integration_tests")]
+static_assertions::assert_not_impl_all!(crate::App: Sync);
+#[cfg(feature = "integration_tests")]
+static_assertions::assert_not_impl_all!(crate::Presenter: Send);
+#[cfg(feature = "integration_tests")]
+static_assertions::assert_not_impl_all!(crate::Presenter: Sync);
+
 use crate::platform::CapturedFrame;
 
 /// Well-known key used to store the `VideoRecorder` inside `StepDataMap`.
@@ -77,11 +92,11 @@ impl VideoRecorder {
         {
             self.recording_start = Some(Instant::now());
         }
-        self.recording.store(true, Ordering::Relaxed);
+        self.recording.store(true, Ordering::Release);
     }
 
     pub fn stop_recording(&mut self) {
-        self.recording.store(false, Ordering::Relaxed);
+        self.recording.store(false, Ordering::Release);
     }
 
     /// Signals the capture loop to exit on its next iteration.
@@ -90,7 +105,7 @@ impl VideoRecorder {
     }
 
     pub fn is_recording(&self) -> bool {
-        self.recording.load(Ordering::Relaxed)
+        self.recording.load(Ordering::Acquire)
     }
 
     /// Returns the instant recording started, if recording has been started.
@@ -302,7 +317,7 @@ pub async fn run_capture_loop(app: crate::App, state: CaptureLoopState) {
             break;
         }
 
-        if !state.recording.load(Ordering::Relaxed) {
+        if !state.recording.load(Ordering::Acquire) {
             continue;
         }
 

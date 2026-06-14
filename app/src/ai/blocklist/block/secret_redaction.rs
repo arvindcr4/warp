@@ -553,11 +553,13 @@ impl SecretRedactionState {
                         combined_text.rfind(|c: char| c.is_whitespace())
                     {
                         let slice_with_space = &combined_text[last_space_byte_index..];
-                        let space_offset = slice_with_space
-                            .chars()
-                            .next()
-                            .expect("The whitespace character should be present")
-                            .len_utf8();
+                        let first_char = slice_with_space.chars().next().unwrap_or_else(|| {
+                            panic!(
+                                "rfind returned index {} but no char starts at that position in {:?}",
+                                last_space_byte_index, slice_with_space
+                            )
+                        });
+                        let space_offset = first_char.len_utf8();
                         self.last_word_to_rescan_for_redaction =
                             combined_text[last_space_byte_index + space_offset..].to_string();
                     } else {
