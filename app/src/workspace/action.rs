@@ -225,6 +225,17 @@ pub enum WorkspaceAction {
     CloseTabsOutsideGroup(TabGroupId),
     CloseTabsAboveGroup(TabGroupId),
     CloseTabsBelowGroup(TabGroupId),
+    /// Pins the tab at the given index. If the tab is part of a group, it
+    /// is first extracted from the group and then pinned as ungrouped.
+    PinTab(usize),
+    /// Unpins the tab at the given index.
+    UnpinTab(usize),
+    /// Pins the entire tab group: sets the group as pinned
+    /// and moves the group block to the end of the pinned region.
+    PinTabGroup(TabGroupId),
+    /// Unpins the entire tab group: clears the pinned flag on the group
+    /// and moves the group block to the start of the unpinned region.
+    UnpinTabGroup(TabGroupId),
     AddDefaultTab,
     AddTerminalTab {
         hide_homepage: bool,
@@ -352,6 +363,7 @@ pub enum WorkspaceAction {
     OpenCodeReviewPanel(PaneViewLocator),
     /// Toggles the vertical tabs panel. This happens as an explicit action from the user.
     ToggleVerticalTabsPanel,
+    OpenVerticalTabsPanel,
     ToggleVerticalTabsSettingsPopup,
     SetVerticalTabsDisplayGranularity(VerticalTabsDisplayGranularity),
     SetVerticalTabsTabItemMode(VerticalTabsTabItemMode),
@@ -649,10 +661,13 @@ pub enum WorkspaceAction {
     NavigatePrevPaneOrPanel,
     NavigateNextPaneOrPanel,
     ToggleProjectExplorer,
+    OpenProjectExplorer,
     ToggleGlobalSearch,
     ToggleHiddenFiles,
     OpenGlobalSearch,
     ToggleConversationListView,
+    OpenConversationListView,
+    OpenAgentManagementView,
     /// Open the Build Plan Migration Modal (for debugging)
     #[cfg(debug_assertions)]
     OpenBuildPlanMigrationModal,
@@ -871,6 +886,10 @@ impl WorkspaceAction {
             | CloseTabsOutsideGroup(_)
             | CloseTabsAboveGroup(_)
             | CloseTabsBelowGroup(_)
+            | PinTab(_)
+            | UnpinTab(_)
+            | PinTabGroup(_)
+            | UnpinTabGroup(_)
             | ToggleTabColor { .. }
             | AddDefaultTab
             | AddTerminalTab { .. }
@@ -895,7 +914,8 @@ impl WorkspaceAction {
             | SummarizeAIConversation { .. }
             | OpenRepository { .. }
             | SelectTabConfig(_)
-            | ToggleVerticalTabsPanel => true, // actions that actually change a state of the state of user's
+            | ToggleVerticalTabsPanel
+            | OpenVerticalTabsPanel => true, // actions that actually change a state of the state of user's
             // workspace would most likely require a save, so that if the app gets
             // restarted, the user can continue working
             AutoupdateFailureLink
@@ -1053,12 +1073,15 @@ impl WorkspaceAction {
             | NavigatePrevPaneOrPanel
             | NavigateNextPaneOrPanel
             | ToggleProjectExplorer
+            | OpenProjectExplorer
             | ToggleGlobalSearch
             | ToggleHiddenFiles
             | OpenGlobalSearch
             | ToggleConversationListView
+            | OpenConversationListView
             | ToggleNotificationMailbox { .. }
             | ToggleAgentManagementView
+            | OpenAgentManagementView
             | ViewAgentRunsForEnvironment { .. }
             | ToggleAIDocumentPane { .. }
             | HideAIDocumentPanes
