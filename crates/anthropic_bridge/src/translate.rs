@@ -252,6 +252,42 @@ fn map_usage(usage: &Value) -> Value {
     })
 }
 
+/// A normalized piece of assistant content, independent of whether it arrived
+/// as a complete (non-streaming) block or as the opening of a streamed block.
+///
+/// This is the single place Anthropic content-block types are classified into
+/// their OpenAI targets (text → `content`, thinking → `reasoning_content`,
+/// tool_use → `tool_calls`); both the batch and streaming paths fold through
+/// it, so a new block type is one edit here.
+enum ContentPiece {
+    Text(String),
+    Reasoning(String),
+    ToolUse {
+        id: String,
+        name: String,
+        input: Value,
+    },
+}
+
+/// Maps one complete Anthropic content block to its OpenAI piece, or `None` for
+/// block types the bridge does not surface.
+fn content_piece(block: &Value) -> Option<ContentPiece> {
+    match block["type"].as_str()? {
+        "text" => Some(ContentPiece::Text(
+            block["text"].as_str().unwrap_or_default().to_string(),
+        )),
+        "thinking" => Some(ContentPiece::Reasoning(
+            block["thinking"].as_str().unwrap_or_default().to_string(),
+        )),
+        "tool_use" => Some(ContentPiece::ToolUse {
+            id: block["id"].as_str().unwrap_or_default().to_string(),
+            name: block["name"].as_str().unwrap_or_default().to_string(),
+            input: block["input"].clone(),
+        }),
+        _ => None,
+    }
+}
+
 /// Translates a non-streaming Anthropic Messages response into an OpenAI
 /// Chat Completions response.
 pub fn anthropic_to_openai_response(resp: &Value) -> Value {
@@ -261,22 +297,20 @@ pub fn anthropic_to_openai_response(resp: &Value) -> Value {
 
     if let Some(blocks) = resp["content"].as_array() {
         for block in blocks {
-            match block["type"].as_str() {
-                Some("text") => text.push_str(block["text"].as_str().unwrap_or_default()),
-                Some("thinking") => {
-                    reasoning.push_str(block["thinking"].as_str().unwrap_or_default())
-                }
-                Some("tool_use") => {
+            match content_piece(block) {
+                Some(ContentPiece::Text(t)) => text.push_str(&t),
+                Some(ContentPiece::Reasoning(r)) => reasoning.push_str(&r),
+                Some(ContentPiece::ToolUse { id, name, input }) => {
                     tool_calls.push(json!({
-                        "id": block["id"],
+                        "id": id,
                         "type": "function",
                         "function": {
-                            "name": block["name"],
-                            "arguments": block["input"].to_string(),
+                            "name": name,
+                            "arguments": input.to_string(),
                         }
                     }));
                 }
-                _ => {}
+                None => {}
             }
         }
     }
@@ -395,23 +429,27 @@ impl SseTranslator {
             }
             Some("content_block_start") => {
                 let block_index = data["index"].as_u64().unwrap_or(0);
-                let block = &data["content_block"];
-                if block["type"] == "tool_use" {
-                    let tool_index = self.next_tool_index;
-                    self.next_tool_index += 1;
-                    self.tool_indices.push((block_index, tool_index));
-                    vec![self.chunk(
-                        json!({"tool_calls": [{
-                            "index": tool_index,
-                            "id": block["id"],
-                            "type": "function",
-                            "function": {"name": block["name"], "arguments": ""},
-                        }]}),
-                        None,
-                        None,
-                    )]
-                } else {
-                    vec![]
+                // tool_use blocks open a streamed tool call; text/thinking
+                // blocks carry their payload in subsequent deltas, so they
+                // produce no frame here. Classification is shared with the
+                // non-streaming path via `content_piece`.
+                match content_piece(&data["content_block"]) {
+                    Some(ContentPiece::ToolUse { id, name, .. }) => {
+                        let tool_index = self.next_tool_index;
+                        self.next_tool_index += 1;
+                        self.tool_indices.push((block_index, tool_index));
+                        vec![self.chunk(
+                            json!({"tool_calls": [{
+                                "index": tool_index,
+                                "id": id,
+                                "type": "function",
+                                "function": {"name": name, "arguments": ""},
+                            }]}),
+                            None,
+                            None,
+                        )]
+                    }
+                    _ => vec![],
                 }
             }
             Some("content_block_delta") => {

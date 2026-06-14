@@ -110,12 +110,19 @@ pub struct CustomEndpointDraft {
 
 impl From<CustomEndpointDraft> for CustomEndpoint {
     fn from(draft: CustomEndpointDraft) -> Self {
+        // The bridge URL only applies to Anthropic-format endpoints; for
+        // OpenAI format we clear any stale value so the stored endpoint always
+        // reflects the invariant. This is the one place that rule lives.
+        let anthropic_bridge_url = match draft.api_format {
+            ApiFormat::OpenAiChatCompletions => String::new(),
+            ApiFormat::AnthropicMessages => draft.anthropic_bridge_url,
+        };
         CustomEndpoint {
             name: draft.name,
             url: draft.url,
             api_key: draft.api_key,
             api_format: draft.api_format,
-            anthropic_bridge_url: draft.anthropic_bridge_url,
+            anthropic_bridge_url,
             models: draft
                 .models
                 .into_iter()
@@ -128,6 +135,33 @@ impl From<CustomEndpointDraft> for CustomEndpoint {
                 })
                 .collect(),
         }
+    }
+}
+
+impl CustomEndpointDraft {
+    /// Validates that the draft is saveable as a [`CustomEndpoint`]: it needs a
+    /// name, a URL, an API key, and at least one named model. This is the
+    /// domain rule for "is this endpoint complete", owned here rather than in
+    /// the settings view, so it can be exercised directly in tests. URL syntax
+    /// and host policy (HTTPS, no private hosts) stay a UI concern.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.name.trim().is_empty() {
+            return Err("Endpoint name is required.".to_string());
+        }
+        if self.url.trim().is_empty() {
+            return Err("Endpoint URL is required.".to_string());
+        }
+        if self.api_key.trim().is_empty() {
+            return Err("API key is required.".to_string());
+        }
+        if !self
+            .models
+            .iter()
+            .any(|(name, _, _)| !name.trim().is_empty())
+        {
+            return Err("At least one model is required.".to_string());
+        }
+        Ok(())
     }
 }
 

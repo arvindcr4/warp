@@ -1,10 +1,7 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-use ::ai::api_keys::{ApiFormat, CustomEndpoint};
-use ::ai::minimax::{
-    minimax_url, switch_minimax_url_format, MinimaxRegion, MINIMAX_DEFAULT_MODELS,
-    MINIMAX_ENDPOINT_NAME,
-};
+use ::ai::api_keys::{ApiFormat, CustomEndpoint, CustomEndpointDraft};
+use ::ai::minimax::{minimax_preset, switch_minimax_url_format, MinimaxRegion};
 use url::Url;
 use warp_editor::editor::NavigationKey;
 use warpui::elements::{
@@ -422,31 +419,16 @@ impl CustomEndpointModal {
         }
     }
 
-    fn save(&mut self, ctx: &mut ViewContext<Self>) {
-        self.validate_url_field(ctx);
-        self.validate_bridge_url_field(ctx);
-        if !self.is_valid(ctx) {
-            return;
-        }
-        let name = self.endpoint_name_editor.as_ref(ctx).buffer_text(ctx);
-        let url = self.endpoint_url_editor.as_ref(ctx).buffer_text(ctx);
-        let api_key = self.api_key_editor.as_ref(ctx).buffer_text(ctx);
-        let api_format = self.api_format;
-        let anthropic_bridge_url = match api_format {
-            ApiFormat::OpenAiChatCompletions => String::new(),
-            ApiFormat::AnthropicMessages => self
-                .bridge_url_editor
-                .as_ref(ctx)
-                .buffer_text(ctx)
-                .trim()
-                .to_string(),
-        };
-        let models: Vec<(String, Option<String>, Option<String>)> = self
+    /// Reads the current form fields into a [`CustomEndpointDraft`]. This is the
+    /// modal's one place that turns editor state into the domain type; both
+    /// `save` and `is_valid` go through it so they never drift.
+    fn to_draft(&self, app: &AppContext) -> CustomEndpointDraft {
+        let models = self
             .model_rows
             .iter()
             .map(|row| {
-                let name = row.name_editor.as_ref(ctx).buffer_text(ctx);
-                let alias = row.alias_editor.as_ref(ctx).buffer_text(ctx);
+                let name = row.name_editor.as_ref(app).buffer_text(app);
+                let alias = row.alias_editor.as_ref(app).buffer_text(app);
                 let alias_opt = if alias.trim().is_empty() {
                     None
                 } else {
@@ -456,6 +438,38 @@ impl CustomEndpointModal {
             })
             .filter(|(name, _, _)| !name.trim().is_empty())
             .collect();
+        CustomEndpointDraft {
+            name: self.endpoint_name_editor.as_ref(app).buffer_text(app),
+            url: self.endpoint_url_editor.as_ref(app).buffer_text(app),
+            api_key: self.api_key_editor.as_ref(app).buffer_text(app),
+            api_format: self.api_format,
+            // The bridge URL is passed as-typed; `CustomEndpoint`'s `From`
+            // normalizes it (clearing it for OpenAI format), so this view no
+            // longer encodes that rule.
+            anthropic_bridge_url: self
+                .bridge_url_editor
+                .as_ref(app)
+                .buffer_text(app)
+                .trim()
+                .to_string(),
+            models,
+        }
+    }
+
+    fn save(&mut self, ctx: &mut ViewContext<Self>) {
+        self.validate_url_field(ctx);
+        self.validate_bridge_url_field(ctx);
+        if !self.is_valid(ctx) {
+            return;
+        }
+        let CustomEndpointDraft {
+            name,
+            url,
+            api_key,
+            api_format,
+            anthropic_bridge_url,
+            models,
+        } = self.to_draft(ctx);
         if let Some(index) = self.editing_index {
             ctx.emit(CustomEndpointModalEvent::SaveEndpoint {
                 index,
@@ -524,11 +538,12 @@ impl CustomEndpointModal {
     }
 
     fn apply_minimax_preset(&mut self, region: MinimaxRegion, ctx: &mut ViewContext<Self>) {
+        let preset = minimax_preset(region, self.api_format);
         self.endpoint_name_editor.update(ctx, |editor, ctx| {
-            editor.set_buffer_text(MINIMAX_ENDPOINT_NAME, ctx);
+            editor.set_buffer_text(preset.name, ctx);
         });
         self.endpoint_url_editor.update(ctx, |editor, ctx| {
-            editor.set_buffer_text(minimax_url(region, self.api_format), ctx);
+            editor.set_buffer_text(preset.url, ctx);
         });
         self.url_has_error = false;
 
@@ -537,7 +552,7 @@ impl CustomEndpointModal {
         self.model_rows.clear();
         let font_family = Appearance::as_ref(ctx).ui_font_family();
         let text_colors = crate::settings_view::editor_text_colors(Appearance::as_ref(ctx));
-        for (model, alias) in MINIMAX_DEFAULT_MODELS {
+        for (model, alias) in preset.models {
             self.model_rows.push(Self::create_model_row(
                 Some(model),
                 Some(alias),
@@ -563,24 +578,22 @@ impl CustomEndpointModal {
     }
 
     fn is_valid(&self, app: &AppContext) -> bool {
-        let name = self.endpoint_name_editor.as_ref(app).buffer_text(app);
-        let url = self.endpoint_url_editor.as_ref(app).buffer_text(app);
-        let api_key = self.api_key_editor.as_ref(app).buffer_text(app);
-        let has_models = self.model_rows.iter().any(|row| {
-            !row.name_editor
-                .as_ref(app)
-                .buffer_text(app)
-                .trim()
-                .is_empty()
-        });
-        let bridge_url_ok = match self.api_format {
+        let draft = self.to_draft(app);
+        // Saveability (required fields, at least one model) is the domain rule,
+        // owned by the draft. URL syntax / host policy stays a UI concern.
+        if draft.validate().is_err() {
+            return false;
+        }
+        if validate_url(&draft.url).is_err() {
+            return false;
+        }
+        match draft.api_format {
             ApiFormat::OpenAiChatCompletions => true,
             ApiFormat::AnthropicMessages => {
-                let bridge_url = self.bridge_url_editor.as_ref(app).buffer_text(app);
-                bridge_url.trim().is_empty() || validate_url(&bridge_url).is_ok()
+                draft.anthropic_bridge_url.trim().is_empty()
+                    || validate_url(&draft.anthropic_bridge_url).is_ok()
             }
-        };
-        is_endpoint_form_valid(&name, &url, &api_key, has_models) && bridge_url_ok
+        }
     }
 
     fn editor_chain(&self) -> Vec<&ViewHandle<EditorView>> {
@@ -1211,14 +1224,6 @@ fn validate_url(url: &str) -> Result<(), &'static str> {
         return Err("URL must not use a local or private host");
     }
     Ok(())
-}
-
-fn is_endpoint_form_valid(name: &str, url: &str, api_key: &str, has_models: bool) -> bool {
-    !name.trim().is_empty()
-        && !url.trim().is_empty()
-        && !api_key.trim().is_empty()
-        && has_models
-        && validate_url(url).is_ok()
 }
 
 fn is_restricted_host(host: &str) -> bool {

@@ -505,3 +505,67 @@ fn custom_model_providers_use_bridged_base_url() {
     let providers = manager.custom_model_providers_for_request(true).unwrap();
     assert_eq!(providers.providers[0].base_url, expected);
 }
+
+// ── CustomEndpointDraft: normalization + validation ─────────────
+
+fn draft(api_format: ApiFormat, bridge: &str) -> CustomEndpointDraft {
+    CustomEndpointDraft {
+        name: "MiniMax".into(),
+        url: "https://api.minimax.io/v1".into(),
+        api_key: "sk-cp-test".into(),
+        api_format,
+        anthropic_bridge_url: bridge.into(),
+        models: vec![("MiniMax-M3".into(), Some("MiniMax M3".into()), None)],
+    }
+}
+
+#[test]
+fn draft_clears_bridge_url_for_openai_format() {
+    // A stale bridge URL left from Anthropic mode is dropped on conversion.
+    let ep: CustomEndpoint = draft(
+        ApiFormat::OpenAiChatCompletions,
+        "https://bridge.example.com",
+    )
+    .into();
+    assert!(ep.anthropic_bridge_url.is_empty());
+}
+
+#[test]
+fn draft_keeps_bridge_url_for_anthropic_format() {
+    let ep: CustomEndpoint =
+        draft(ApiFormat::AnthropicMessages, "https://bridge.example.com").into();
+    assert_eq!(ep.anthropic_bridge_url, "https://bridge.example.com");
+}
+
+#[test]
+fn draft_assigns_config_key_when_missing() {
+    let ep: CustomEndpoint = draft(ApiFormat::OpenAiChatCompletions, "").into();
+    assert_eq!(ep.models.len(), 1);
+    assert!(!ep.models[0].config_key.is_empty());
+}
+
+#[test]
+fn draft_validate_ok_for_complete_draft() {
+    assert!(draft(ApiFormat::OpenAiChatCompletions, "")
+        .validate()
+        .is_ok());
+}
+
+#[test]
+fn draft_validate_rejects_missing_fields() {
+    let mut d = draft(ApiFormat::OpenAiChatCompletions, "");
+    d.name = "  ".into();
+    assert!(d.validate().is_err());
+
+    let mut d = draft(ApiFormat::OpenAiChatCompletions, "");
+    d.url = String::new();
+    assert!(d.validate().is_err());
+
+    let mut d = draft(ApiFormat::OpenAiChatCompletions, "");
+    d.api_key = String::new();
+    assert!(d.validate().is_err());
+
+    let mut d = draft(ApiFormat::OpenAiChatCompletions, "");
+    d.models = vec![("   ".into(), None, None)];
+    assert!(d.validate().is_err());
+}

@@ -72,29 +72,3 @@ fn validate_url_rejects_localhost_and_private_ips() {
     assert_eq!(validate_url("https://[fe80::1]/v1"), error);
     assert_eq!(validate_url("https://[::ffff:192.168.0.1]/v1"), error);
 }
-
-#[test]
-fn endpoint_form_valid_rejects_invalid_current_url() {
-    assert!(!is_endpoint_form_valid(
-        "Endpoint",
-        "http://api.example.com/v1",
-        "key",
-        true
-    ));
-}
-
-#[test]
-fn endpoint_form_valid_requires_non_empty_url() {
-    assert!(!is_endpoint_form_valid("Endpoint", "", "key", true));
-    assert!(!is_endpoint_form_valid("Endpoint", "   ", "key", true));
-}
-
-#[test]
-fn endpoint_form_valid_accepts_complete_valid_form() {
-    assert!(is_endpoint_form_valid(
-        "Endpoint",
-        "https://api.example.com/v1",
-        "key",
-        true
-    ));
-}

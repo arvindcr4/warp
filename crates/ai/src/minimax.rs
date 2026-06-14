@@ -47,6 +47,26 @@ pub fn minimax_url(region: MinimaxRegion, api_format: ApiFormat) -> &'static str
     }
 }
 
+/// Everything needed to prefill a custom-endpoint form for a MiniMax Token
+/// Plan: the endpoint name, the base URL for the chosen wire format, and the
+/// default models. One call gives the UI the whole preset, so it no longer
+/// reaches for [`MINIMAX_ENDPOINT_NAME`], [`minimax_url`], and
+/// [`MINIMAX_DEFAULT_MODELS`] separately.
+pub struct MinimaxPreset {
+    pub name: &'static str,
+    pub url: &'static str,
+    pub models: &'static [(&'static str, &'static str)],
+}
+
+/// Builds the MiniMax Token Plan preset for a region and wire protocol.
+pub fn minimax_preset(region: MinimaxRegion, api_format: ApiFormat) -> MinimaxPreset {
+    MinimaxPreset {
+        name: MINIMAX_ENDPOINT_NAME,
+        url: minimax_url(region, api_format),
+        models: MINIMAX_DEFAULT_MODELS,
+    }
+}
+
 /// If `url` is a known MiniMax endpoint, returns the equivalent URL in the
 /// requested API format so the UI can keep the URL field in sync when the
 /// user flips formats. Returns `None` for non-MiniMax URLs (including ones
