@@ -273,7 +273,7 @@ impl Scrollable {
     }
 
     fn state(&mut self) -> MutexGuard<'_, ScrollState> {
-        self.state.lock().unwrap()
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     fn mouse_dragged(&mut self, position: Vector2F, ctx: &mut EventContext, app: &AppContext) {

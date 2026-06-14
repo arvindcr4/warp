@@ -16,6 +16,7 @@ http = "1"
 log.workspace = true
 oauth2.workspace = true
 pin-project-lite = "0.2"
+regex.workspace = true
 reqwest = { workspace = true, features = ["json", "stream"] }
 rmcp = { workspace = true, features = ["client"] }
 serde.workspace = true

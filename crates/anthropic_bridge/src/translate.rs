@@ -506,23 +506,35 @@ impl SseTranslator {
     /// Feeds raw SSE text into the translator, returning translated OpenAI
     /// SSE frames for every complete upstream event.
     pub fn push(&mut self, text: &str) -> Vec<String> {
-        self.buffer.push_str(text);
+        // Normalize CRLF to LF to prevent unbounded buffer growth when upstream
+        // sends \r\n\r\n event separators that don't match the \n\n pattern.
+        let text = if text.contains('\r') {
+            text.replace("\r\n", "\n")
+        } else {
+            text.to_string()
+        };
+        self.buffer.push_str(&text);
         let mut out = Vec::new();
         // SSE events are separated by a blank line. Process every complete
         // event currently in the buffer, keeping any trailing partial event.
         while let Some(pos) = self.buffer.find("\n\n") {
             let event: String = self.buffer.drain(..pos + 2).collect();
+
+            // Per SSE spec, multiple data: lines within one event are
+            // joined with \n to form the complete event payload.
+            let mut data_lines: Vec<&str> = Vec::new();
             for line in event.lines() {
-                let Some(data) = line.strip_prefix("data:") else {
-                    continue;
-                };
-                let data = data.trim();
-                if data.is_empty() {
-                    continue;
+                if let Some(data) = line.strip_prefix("data:") {
+                    data_lines.push(data.trim());
                 }
-                if let Ok(value) = serde_json::from_str::<Value>(data) {
-                    out.extend(self.process_event(&value));
-                }
+            }
+            // Ignore events with no data: lines (e.g. bare event: ping).
+            if data_lines.is_empty() {
+                continue;
+            }
+            let joined = data_lines.join("\n");
+            if let Ok(value) = serde_json::from_str::<Value>(&joined) {
+                out.extend(self.process_event(&value));
             }
         }
         out

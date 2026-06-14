@@ -289,7 +289,7 @@ impl Resizable {
     fn state(&mut self) -> MutexGuard<'_, ResizableState> {
         self.state_handle
             .lock()
-            .expect("Resizable state should be accessible")
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     /// Determine if the mouse is hovering over the dragbar

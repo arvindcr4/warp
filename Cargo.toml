@@ -26,6 +26,7 @@ default-members = [
 authors = ["Warp Team <dev@warp.dev>"]
 license = "AGPL-3.0-only"
 publish = false
+rust-version = "1.80"
 
 [workspace.dependencies]
 # Local workspace crates. This lets us reference them in other crates without specifying a path.

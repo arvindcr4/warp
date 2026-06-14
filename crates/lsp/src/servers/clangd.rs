@@ -234,10 +234,10 @@ impl LanguageServerCandidate for ClangdCandidate {
         _metadata: LanguageServerMetadata,
         _executor: &CommandBuilder,
     ) -> anyhow::Result<()> {
-        todo!()
+        anyhow::bail!("install not yet implemented for clangd")
     }
 
     async fn fetch_latest_server_metadata(&self) -> anyhow::Result<LanguageServerMetadata> {
-        todo!()
+        anyhow::bail!("fetch_latest_server_metadata not yet implemented for clangd")
     }
 }

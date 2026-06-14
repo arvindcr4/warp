@@ -135,13 +135,48 @@ async fn handle_post(
     if stream {
         let mut translator = SseTranslator::new();
         let mut upstream_stream = upstream.bytes_stream();
+        let mut done_sent = false;
         let body_stream = async_stream::stream! {
             while let Some(chunk) = upstream_stream.next().await {
-                let Ok(bytes) = chunk else { break };
-                let text = String::from_utf8_lossy(&bytes).into_owned();
-                for frame in translator.push(&text) {
-                    yield Ok::<_, std::convert::Infallible>(Bytes::from(frame));
+                match chunk {
+                    Ok(bytes) => {
+                        let text = String::from_utf8_lossy(&bytes).into_owned();
+                        for frame in translator.push(&text) {
+                            if frame == "data: [DONE]\n\n" {
+                                done_sent = true;
+                            }
+                            yield Ok::<_, std::convert::Infallible>(
+                                Bytes::from(frame),
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        // Flush any complete events still in the buffer, then
+                        // emit an error frame and termination marker so the
+                        // client does not hang or receive an abrupt disconnect.
+                        let _ = translator.push("");
+                        let error_frame = format!(
+                            "data: {}\n\n",
+                            serde_json::json!({
+                                "error": {
+                                    "message": format!("upstream stream error: {e}"),
+                                    "type": "bridge_error",
+                                }
+                            }),
+                        );
+                        yield Ok(Bytes::from(error_frame));
+                        yield Ok(Bytes::from("data: [DONE]\n\n"));
+                        done_sent = true;
+                        return;
+                    }
                 }
+            }
+            // Stream ended without a proper termination event (e.g. upstream
+            // closed the connection mid-response). Send a termination marker so
+            // the downstream client does not hang waiting for more data.
+            if !done_sent {
+                let _ = translator.push("");
+                yield Ok(Bytes::from("data: [DONE]\n\n"));
             }
         };
         match Response::builder()

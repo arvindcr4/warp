@@ -200,7 +200,7 @@ impl Hoverable {
     where
         F: FnOnce(&MouseState) -> Box<dyn Element>,
     {
-        let child = build_child(&state.lock().unwrap());
+        let child = build_child(&state.lock().unwrap_or_else(|e| e.into_inner()));
         Self {
             child,
             state,
@@ -392,7 +392,7 @@ impl Hoverable {
     }
 
     fn state(&mut self) -> MutexGuard<'_, MouseState> {
-        self.state.lock().unwrap()
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Determine if the mouse is currently over the element.

@@ -22,6 +22,62 @@ use super::TemplatableMCPServerInfo;
 type ReqwestHttpTransport = rmcp::transport::StreamableHttpClientTransport<reqwest::Client>;
 type ReqwestSseTransport = crate::sse_transport::SseClientTransport<reqwest::Client>;
 
+/// Known-safe MCP server command binary names (allowlisted for process spawning).
+///
+/// Commands not in this list will still be spawned for backwards compatibility,
+/// but a warning will be logged so operators can audit unexpected binaries.
+/// Commands containing shell metacharacters are unconditionally rejected.
+const ALLOWLISTED_MCP_COMMANDS: &[&str] = &[
+    "npx",      // Node.js package runner (most common MCP server launcher)
+    "uvx",      // Python project runner
+    "uv",       // Python package manager
+    "node",     // Direct Node.js execution
+    "python3",
+    "python",
+    "deno",
+    "bun",
+    "go",
+];
+
+/// Returns `true` if `command` contains shell metacharacters that could be used
+/// for argument injection when passed through `cmd.exe /c` or similar wrappers.
+fn contains_shell_metacharacters(command: &str) -> bool {
+    command.contains(['|', ';', '&', '`', '$', '(', ')', '{', '}', '<', '>', '\n', '\r'])
+}
+
+/// Validate that `command` is safe to spawn as an MCP server child process.
+///
+/// 1. Rejects commands containing shell metacharacters (hard block).
+/// 2. Logs a warning if the binary name is not in [`ALLOWLISTED_MCP_COMMANDS`].
+///
+/// Returns `true` if the command passes validation (or is merely unlisted).
+fn validate_mcp_command(command: &str, logger: &SimpleLogger) -> bool {
+    // Hard block: shell metacharacters are never acceptable.
+    if contains_shell_metacharacters(command) {
+        logger.log(format!(
+            "[error] MCP: Rejected command '{command}' — contains shell metacharacters"
+        ));
+        return false;
+    }
+
+    // Extract the bare binary name (e.g. "npx" from "/usr/local/bin/npx").
+    let binary_name = std::path::Path::new(command)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(command);
+
+    // Warn-but-allow for unlisted commands (backwards compatible).
+    if !ALLOWLISTED_MCP_COMMANDS.contains(&binary_name) {
+        logger.log(format!(
+            "[warn] MCP: Command '{binary_name}' is not in the allowlist of \
+             known-safe MCP server binaries. Known-safe: {}",
+            ALLOWLISTED_MCP_COMMANDS.join(", "),
+        ));
+    }
+
+    true
+}
+
 /// Convert an rmcp error to a user-friendly error message.
 pub fn error_to_user_message(error: &rmcp::RmcpError) -> String {
     match error {
@@ -76,6 +132,74 @@ fn build_header_map(headers: &HashMap<String, String>) -> reqwest::header::Heade
     headers.try_into().unwrap_or_default()
 }
 
+/// Redacts common secret patterns from a line of text for safe logging.
+///
+/// Replaces the *value* portion of known sensitive keys and known API key
+/// formats with `[REDACTED]`. The key name and separator are preserved so
+/// the log remains readable.
+///
+/// Patterns covered:
+/// - Key-value pairs for `api_key`, `apikey`, `secret`, `password`,
+///   `passwd`, `private_key`, `auth_token` (case-insensitive)
+/// - `Authorization: Bearer <token>` headers
+/// - Known API key formats: `sk-*` (OpenAI/Anthropic), `gh[pousr]_*` (GitHub)
+/// - Sensitive URL query parameters (`?key=value`, `&token=value`, etc.)
+pub fn redact_line(line: &str) -> String {
+    use std::sync::OnceLock;
+
+    static SENSITIVE_PAIR: OnceLock<regex::Regex> = OnceLock::new();
+    static AUTH_HEADER: OnceLock<regex::Regex> = OnceLock::new();
+    static KNOWN_KEYS: OnceLock<regex::Regex> = OnceLock::new();
+    static QUERY_PARAMS: OnceLock<regex::Regex> = OnceLock::new();
+
+    let mut redacted = line.to_string();
+
+    // Key=value pairs for known sensitive keys.
+    let sensitive_pair = SENSITIVE_PAIR
+        .get_or_init(|| {
+            regex::Regex::new(
+                r#"(?i)((?:api[_-]?key|apikey|secret|password|passwd|private[_-]?key|auth[_-]?token)[=:]\s*)\S+"#,
+            )
+            .expect("valid regex")
+        });
+    redacted = sensitive_pair.replace_all(&redacted, "$1[REDACTED]").into_owned();
+
+    // Authorization: Bearer <token>
+    let auth_header = AUTH_HEADER
+        .get_or_init(|| {
+            regex::Regex::new(r#"(?i)(Authorization:\s*Bearer\s+)\S+"#)
+                .expect("valid regex")
+        });
+    redacted = auth_header.replace_all(&redacted, "$1[REDACTED]").into_owned();
+
+    // Known API key formats.
+    let known_keys = KNOWN_KEYS
+        .get_or_init(|| {
+            regex::Regex::new(
+                r#"\b(sk-[A-Za-z0-9]{20,}|gh[pousr]_[A-Za-z0-9]{16,})\b"#,
+            )
+            .expect("valid regex")
+        });
+    redacted = known_keys.replace_all(&redacted, "[REDACTED]").into_owned();
+
+    // URL query parameter values for sensitive params.
+    let query_params = QUERY_PARAMS
+        .get_or_init(|| {
+            regex::Regex::new(
+                r#"(?i)([?&](?:api[_-]?key|apikey|secret|token|password|auth)=)[^&\s]+"#,
+            )
+            .expect("valid regex")
+        });
+    redacted = query_params.replace_all(&redacted, "$1[REDACTED]").into_owned();
+
+    redacted
+}
+
+/// The maximum number of bytes a single stderr line may contain before we
+/// truncate it for logging. This bounds memory use in case a misbehaving
+/// child process emits a line without a newline.
+const STDERR_MAX_LINE_BYTES: usize = 4096;
+
 /// Builds a reqwest client with custom headers for MCP HTTP/SSE connections.
 #[allow(clippy::result_large_err)]
 pub fn build_client_with_headers(
@@ -116,6 +240,11 @@ pub async fn spawn_server(
                     // PATH variable rather than depending on the `Command` implementation, which only looks for
                     // `.exe` files in directories found in PATH.
                     // https://github.com/rust-lang/rust/issues/37519
+                    //
+                    // NOTE: This wrapping is only required on toolchains older than 1.76.0. Rust 1.76
+                    // (https://github.com/rust-lang/rust/issues/117369) fixed PATH resolution for .exe
+                    // files without the extension. If this project's MSRV >= 1.76, this cmd.exe /c
+                    // wrapping can be removed and the non-Windows branch can be used unconditionally.
                     let command = "cmd.exe".to_owned();
                     let args = std::iter::once("/c".to_owned())
                         .chain(std::iter::once(cli_server.command))
@@ -124,6 +253,30 @@ pub async fn spawn_server(
                 } else {
                     let command = cli_server.command;
                     let args = cli_server.args;
+                }
+            }
+
+            // Security validation: reject shell metacharacters, warn on unlisted commands.
+            // On Windows with cmd.exe /c wrapping, validate the inner command (args[1]),
+            // not the trivial cmd.exe wrapper itself.
+            {
+                let cmd_to_validate = if cfg!(windows) {
+                    args.get(1).map(String::as_str).unwrap_or_default()
+                } else {
+                    command.as_str()
+                };
+                if !validate_mcp_command(cmd_to_validate, &logger) {
+                    return Err(rmcp::RmcpError::transport_creation::<rmcp::transport::TokioChildProcess>(
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            format!(
+                                "MCP server command was rejected by security validation: \
+                                 '{cmd_to_validate}' contains shell metacharacters. \
+                                 If this is a legitimate MCP server command, add it to the \
+                                 allowlist in crates/mcp/src/runtime.rs."
+                            ),
+                        ),
+                    ));
                 }
             }
 
@@ -180,16 +333,32 @@ pub async fn spawn_server(
             // We always expect to have an stderr, but this is marginally safer than unwrapping.
             if let Some(stderr) = stderr {
                 let logger = logger.clone();
-                // Spawn a background task to forward from the child process's stderr to our logger.
+                // Spawn a background task to forward from the child process's stderr to our
+                // logger, with secret redaction and a per-line size limit.
+                logger.log("[note] MCP: stderr from the child process is logged below with \
+                            secrets redacted. Verify that no sensitive data is visible."
+                    .to_string());
                 tokio::spawn(async move {
                     let mut buf = String::new();
                     let mut reader = tokio::io::BufReader::new(stderr);
                     loop {
+                        // Clear the buffer before each read so it doesn't grow unbounded.
+                        buf.clear();
                         match reader.read_line(&mut buf).await {
                             // EOF.
                             Ok(0) => return,
                             // Read some data.
-                            Ok(_) => logger.log(format!("[info] MCP [pid: {pid}] stderr: {buf}")),
+                            Ok(_) => {
+                                // Truncate excessively long lines to bound memory usage.
+                                if buf.len() > STDERR_MAX_LINE_BYTES {
+                                    buf.truncate(STDERR_MAX_LINE_BYTES);
+                                    buf.push_str("...[truncated]");
+                                }
+                                let redacted = redact_line(buf.trim_end());
+                                logger.log(format!(
+                                    "[info] MCP [pid: {pid}] stderr: {redacted}"
+                                ));
+                            }
                             // Failed to read from the child process's stderr.
                             Err(e) => {
                                 log::error!("Failed to read stderr: {e}");
@@ -581,5 +750,5 @@ impl<T: rmcp::transport::Transport<R>, R: rmcp::service::ServiceRole> rmcp::tran
 }
 
 #[cfg(test)]
-#[path = "runtime_tests.rs"]
-mod tests;
+#[path = "redact_tests.rs"]
+mod redact_tests;

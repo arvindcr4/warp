@@ -136,7 +136,7 @@ pub mod text {
                     SearchCodebaseResult::Failed { message, .. } => {
                         writeln!(w, "Searching codebase failed: {message}")
                     }
-                    SearchCodebaseResult::Cancelled => todo!(),
+                    SearchCodebaseResult::Cancelled => writeln!(w, "{CANCELLED_MESSAGE}"),
                 },
                 AIAgentActionResultType::Grep(result) => match result {
                     GrepResult::Success { matched_files } => {

@@ -18,6 +18,16 @@ pub struct Provider {
     pub model: String,
 }
 
+impl Provider {
+    /// Returns `true` when the resolved model indicates a MiniMax model
+    /// (M-series reasoning models that embed chain-of-thought in
+    /// ` thinking... response` blocks).
+    pub fn is_minimax(&self) -> bool {
+        let model = self.model.to_lowercase();
+        model.contains("minimax")
+    }
+}
+
 /// Why a request could not be served against any provider. Each variant renders
 /// its own user-facing message via [`ConfigError::message`], so the caller maps
 /// the error straight to a finished-error event without knowing the details.
@@ -186,9 +196,11 @@ pub async fn call(
             .unwrap_or_default()
             .to_string();
     }
-    // MiniMax M-series embed chain-of-thought as <think>...</think> inside the
+    // MiniMax M-series embed chain-of-thought as  thinking... response inside the
     // content. Strip it so only the user-facing answer is shown.
-    text = strip_think_blocks(&text);
+    if provider.is_minimax() {
+        text = strip_think_blocks(&text);
+    }
 
     let tool_calls: Vec<(String, String, String)> = message["tool_calls"]
         .as_array()

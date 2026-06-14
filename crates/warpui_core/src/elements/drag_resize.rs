@@ -89,7 +89,7 @@ impl DragResizeElement {
     fn state(&self) -> std::sync::MutexGuard<'_, DragResizeState> {
         // This is the same (slightly scary) pattern as `Resizable::state()`.
         // Poisoning should only occur after a prior panic (already in a bad state).
-        self.handle.lock().expect("DragResizeState lock poisoned")
+        self.handle.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
 

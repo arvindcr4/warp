@@ -317,7 +317,7 @@ pub(super) fn init_db(scope: &PersistenceScope) -> Result<SqliteConnection> {
     // a database connection.
     let db_parent = db_path
         .parent()
-        .expect("database file path should be absolute");
+        .context("database file path should be absolute")?;
     if let Err(err) = std::fs::create_dir_all(db_parent) {
         log::warn!(
             "Encountered an error while creating parent directories for sqlite database: {err:#}"
@@ -1023,11 +1023,16 @@ fn save_app_state(conn: &mut SqliteConnection, app_state: &AppState) -> Result<(
                 }
 
                 while !pane_nodes.is_empty() {
-                    let SaveAppStateNodeTraversal {
+                    // The is_empty() guard above guarantees this succeeds, but
+                    // we guard against a logic error rather than panicking.
+                    let Some(SaveAppStateNodeTraversal {
                         node: pane_node,
                         flex,
                         parent_pane_node_id,
-                    } = pane_nodes.pop_front().expect("Should have node");
+                    }) = pane_nodes.pop_front() else {
+                        log::error!("pane_nodes unexpectedly empty after is_empty() check");
+                        break;
+                    };
 
                     // Skip leaves whose content types don't get a
                     // corresponding `pane_leaves` row on save. Otherwise the

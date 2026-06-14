@@ -133,15 +133,15 @@ impl ClippedScrollStateHandle {
     }
 
     pub fn set_start(&self, position: f32) {
-        self.scrollable_data.lock().unwrap().started = Some(position);
+        self.scrollable_data.lock().unwrap_or_else(|e| e.into_inner()).started = Some(position);
     }
 
     pub fn reset_start(&self) {
-        self.scrollable_data.lock().unwrap().started = None;
+        self.scrollable_data.lock().unwrap_or_else(|e| e.into_inner()).started = None;
     }
 
     pub fn start(&self) -> Option<f32> {
-        self.scrollable_data.lock().unwrap().started
+        self.scrollable_data.lock().unwrap_or_else(|e| e.into_inner()).started
     }
 
     /// Scrolls the bounds of the element described by `target` into view.
@@ -152,24 +152,24 @@ impl ClippedScrollStateHandle {
     }
 
     pub fn hovered(&self) -> bool {
-        self.scrollable_data.lock().unwrap().hovered
+        self.scrollable_data.lock().unwrap_or_else(|e| e.into_inner()).hovered
     }
 
     pub fn set_hovered(&self, hovered: bool) {
-        self.scrollable_data.lock().unwrap().hovered = hovered;
+        self.scrollable_data.lock().unwrap_or_else(|e| e.into_inner()).hovered = hovered;
     }
 
     pub(in crate::elements) fn set_child_hovered(&self, hovered: bool) {
         self.scrollable_data
             .lock()
-            .expect("lock should be held")
+            .unwrap_or_else(|e| e.into_inner())
             .child_hovered = hovered;
     }
 
     pub(in crate::elements) fn child_hovered(&self) -> bool {
         self.scrollable_data
             .lock()
-            .expect("lock should be held")
+            .unwrap_or_else(|e| e.into_inner())
             .child_hovered
     }
 }

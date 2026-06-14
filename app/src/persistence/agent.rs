@@ -169,7 +169,11 @@ pub(super) fn select_conversations_to_evict(
                 .iter()
                 .map(|r| r.last_modified_at)
                 .max()
-                .expect("tree always has at least one member by construction");
+                .unwrap_or_else(|| {
+                    log::error!("tree unexpectedly empty during eviction calculation");
+                    // Use MIN so this tree sorts last and gets evicted first.
+                    NaiveDateTime::MIN
+                });
             (effective, root, members)
         })
         .collect();

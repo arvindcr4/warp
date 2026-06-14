@@ -91,7 +91,7 @@ impl AxisConfiguration {
     /// Set the start drag position for the scroll state.
     fn set_start(&self, position: f32) {
         match self {
-            Self::Manual(handle) => handle.lock().unwrap().started = Some(position),
+            Self::Manual(handle) => handle.lock().unwrap_or_else(|e| e.into_inner()).started = Some(position),
             Self::Clipped(ClippedAxisConfiguration { handle, .. }) => handle.set_start(position),
         }
     }
@@ -99,7 +99,7 @@ impl AxisConfiguration {
     /// Reset the start drag position to None for the scroll state.
     fn reset_start(&self) {
         match self {
-            Self::Manual(handle) => handle.lock().unwrap().started = None,
+            Self::Manual(handle) => handle.lock().unwrap_or_else(|e| e.into_inner()).started = None,
             Self::Clipped(ClippedAxisConfiguration { handle, .. }) => handle.reset_start(),
         }
     }
@@ -107,7 +107,7 @@ impl AxisConfiguration {
     /// Read out the start drag postion state from scroll handle.
     fn start(&self) -> Option<f32> {
         match self {
-            Self::Manual(handle) => handle.lock().unwrap().started,
+            Self::Manual(handle) => handle.lock().unwrap_or_else(|e| e.into_inner()).started,
             Self::Clipped(ClippedAxisConfiguration { handle, .. }) => handle.start(),
         }
     }
@@ -127,21 +127,21 @@ impl AxisConfiguration {
     /// Whether the axis' scrollbar is hovered.
     fn hovered(&self) -> bool {
         match self {
-            Self::Manual(handle) => handle.lock().unwrap().hovered,
+            Self::Manual(handle) => handle.lock().unwrap_or_else(|e| e.into_inner()).hovered,
             Self::Clipped(ClippedAxisConfiguration { handle, .. }) => handle.hovered(),
         }
     }
 
     fn set_hovered(&self, hovered: bool) {
         match self {
-            Self::Manual(handle) => handle.lock().unwrap().hovered = hovered,
+            Self::Manual(handle) => handle.lock().unwrap_or_else(|e| e.into_inner()).hovered = hovered,
             Self::Clipped(ClippedAxisConfiguration { handle, .. }) => handle.set_hovered(hovered),
         }
     }
 
     fn child_hovered(&self) -> bool {
         match self {
-            Self::Manual(handle) => handle.lock().expect("lock should be held").child_hovered,
+            Self::Manual(handle) => handle.lock().unwrap_or_else(|e| e.into_inner()).child_hovered,
             Self::Clipped(ClippedAxisConfiguration { handle, .. }) => handle.child_hovered(),
         }
     }
@@ -149,7 +149,7 @@ impl AxisConfiguration {
     fn set_child_hovered(&self, hovered: bool) {
         match self {
             Self::Manual(handle) => {
-                handle.lock().expect("lock should be held").child_hovered = hovered
+                handle.lock().unwrap_or_else(|e| e.into_inner()).child_hovered = hovered
             }
             Self::Clipped(ClippedAxisConfiguration { handle, .. }) => {
                 handle.set_child_hovered(hovered)

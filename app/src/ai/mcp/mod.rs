@@ -451,7 +451,10 @@ impl MCPServerExt for MCPServer {
             {
                 Ok(mcp_env_vars) => {
                     let env_vars: HashMap<String, String> =
-                        serde_json::from_str(&mcp_env_vars.environment_variables).unwrap();
+                        serde_json::from_str(&mcp_env_vars.environment_variables).unwrap_or_else(|e| {
+                            log::error!("Failed to parse MCP environment variables: {e}");
+                            HashMap::new()
+                        });
                     apply_values(&mut cli_server.static_env_vars, &env_vars);
                 }
                 Err(error) => {

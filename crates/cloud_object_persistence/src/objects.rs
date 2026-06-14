@@ -350,29 +350,31 @@ pub fn delete_cloud_object(
     use schema::object_metadata::dsl::*;
 
     let hashed_sync_id = sync_id.sqlite_uid_hash(object_id_type);
-    // Filter to find metadata row.
-    // The diesel types for `filter`s are dependent on the columns being filtered
-    // so while the `hashed_sync_id` will only match one of `client_id` and `server_id`,
-    // we filter on both here for ergonomics.
-    let metadata_filter = object_metadata
-        .filter(client_id.eq(Some(hashed_sync_id.as_str())))
-        .or_filter(server_id.eq(Some(hashed_sync_id.as_str())));
+    conn.transaction::<(), Error, _>(|conn| {
+        // Filter to find metadata row.
+        // The diesel types for `filter`s are dependent on the columns being filtered
+        // so while the `hashed_sync_id` will only match one of `client_id` and `server_id`,
+        // we filter on both here for ergonomics.
+        let metadata_filter = object_metadata
+            .filter(client_id.eq(Some(hashed_sync_id.as_str())))
+            .or_filter(server_id.eq(Some(hashed_sync_id.as_str())));
 
-    let metadata: ObjectMetadata = metadata_filter.first(conn)?;
-    let object_id = metadata.shareable_object_id;
-    diesel::delete(object_metadata.filter(id.eq(metadata.id))).execute(conn)?;
-    diesel::delete(
-        schema::object_permissions::dsl::object_permissions
-            .filter(schema::object_permissions::object_metadata_id.eq(metadata.id)),
-    )
-    .execute(conn)?;
-    diesel::delete(
-        schema::object_actions::dsl::object_actions
-            .filter(schema::object_actions::hashed_object_id.eq(hashed_sync_id)),
-    )
-    .execute(conn)?;
-    delete_object_fn(conn, object_id)?;
-    Ok(())
+        let metadata: ObjectMetadata = metadata_filter.first(conn)?;
+        let object_id = metadata.shareable_object_id;
+        diesel::delete(object_metadata.filter(id.eq(metadata.id))).execute(conn)?;
+        diesel::delete(
+            schema::object_permissions::dsl::object_permissions
+                .filter(schema::object_permissions::object_metadata_id.eq(metadata.id)),
+        )
+        .execute(conn)?;
+        diesel::delete(
+            schema::object_actions::dsl::object_actions
+                .filter(schema::object_actions::hashed_object_id.eq(hashed_sync_id)),
+        )
+        .execute(conn)?;
+        delete_object_fn(conn, object_id)?;
+        Ok(())
+    })
 }
 
 pub fn upsert_generic_string_objects(
