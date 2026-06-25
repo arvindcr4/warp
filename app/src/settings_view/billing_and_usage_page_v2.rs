@@ -252,6 +252,7 @@ impl ClassifiedGrants {
 }
 
 pub struct BillingAndUsagePageV2View {
+    #[allow(dead_code)]
     auth_state: Arc<AuthState>,
     addon_credit_modal_state: ModalViewState<Modal<SpendingLimitModal>>,
     selected_tab: BillingUsageTab,

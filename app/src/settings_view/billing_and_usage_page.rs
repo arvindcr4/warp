@@ -3315,7 +3315,7 @@ pub(crate) fn sort_user_items_in_place<T>(
 impl BillingAndUsagePageView {
     fn render_anonymous_account_info(
         &self,
-        auth_state: &AuthState,
+        _auth_state: &AuthState,
         appearance: &Appearance,
     ) -> Box<dyn Element> {
         let button_styles = UiComponentStyles {
