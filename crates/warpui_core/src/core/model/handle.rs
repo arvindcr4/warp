@@ -1,4 +1,4 @@
-use std::any::{type_name, TypeId};
+use std::any::{TypeId, type_name};
 use std::fmt::{self, Debug};
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
@@ -104,14 +104,13 @@ impl<T> Debug for ModelHandle<T> {
 }
 
 // SAFETY: `ModelHandle<T>` only contains `EntityId` (Copy), `PhantomData<T>`,
-// and `Weak<Mutex<RefCounts>>`. `PhantomData<T>` is `Send + Sync` iff `T` is
-// `Send + Sync`; `EntityId` and `Weak<Mutex<RefCounts>>` are already
-// `Send + Sync`. We require `T: Send + Sync` so that any non-`Send`/`!Sync`
-// internals of `T` (the `Entity` trait gives implementers full freedom) cannot
-// be smuggled across threads through the handle. If `T` itself is `!Send` or
-// `!Sync`, the impls below simply don't apply.
-unsafe impl<T: Send + Sync> Send for ModelHandle<T> {}
-unsafe impl<T: Send + Sync> Sync for ModelHandle<T> {}
+// and `Weak<Mutex<RefCounts>>`. It does not contain or dereference a `T` by
+// itself; all APIs that can reach the model require an `AppContext` or
+// `ModelContext`, which are main-thread UI contexts. Moving or sharing a handle
+// across threads can only move the entity id and clone/drop the weak ref-count
+// pointer, so `T`'s internals cannot be accessed off-thread through the handle.
+unsafe impl<T> Send for ModelHandle<T> {}
+unsafe impl<T> Sync for ModelHandle<T> {}
 
 impl<T> Drop for ModelHandle<T> {
     fn drop(&mut self) {
@@ -243,6 +242,12 @@ impl<T> Clone for WeakModelHandle<T> {
         }
     }
 }
+
+// SAFETY: `WeakModelHandle<T>` contains only an `EntityId` and `PhantomData<T>`.
+// Upgrading it to a strong model handle requires an `AppContext`, so a weak
+// handle cannot access `T` without returning to the main-thread UI context.
+unsafe impl<T> Send for WeakModelHandle<T> {}
+unsafe impl<T> Sync for WeakModelHandle<T> {}
 
 pub trait ModelAsRef {
     fn model<T: Entity>(&self, handle: &ModelHandle<T>) -> &T;

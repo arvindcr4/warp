@@ -8,9 +8,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use ai::agent::action_result::{
-    AskUserQuestionAnswerItem, AskUserQuestionResult, FetchConversationResult, ReadSkillResult,
-    RequestComputerUseResult, SendMessageToAgentResult, StartAgentResult, StartAgentVersion,
-    UseComputerResult,
+    cap_command_output, AskUserQuestionAnswerItem, AskUserQuestionResult, FetchConversationResult,
+    ReadSkillResult, RequestComputerUseResult, SendMessageToAgentResult, StartAgentResult,
+    StartAgentVersion, UseComputerResult,
 };
 use ai::skills::{ParsedSkill, SkillPathOrigin};
 use chrono::{DateTime, Local, TimeZone};
@@ -63,7 +63,7 @@ pub enum RestorationMode {
 /// `restoration_mode` controls how the server metadata is handled - we should only keep the metadata when continuing, not forking
 pub fn convert_conversation_data_to_ai_conversation(
     conversation_id: AIConversationId,
-    conversation_data: &api::ConversationData,
+    conversation_data: api::ConversationData,
     metadata: ServerAIConversationMetadata,
     restoration_mode: RestorationMode,
 ) -> Option<AIConversation> {
@@ -115,7 +115,7 @@ pub fn convert_conversation_data_to_ai_conversation(
 
     match AIConversation::new_restored(
         conversation_id,
-        conversation_data.tasks.clone(),
+        conversation_data.tasks,
         Some(agent_conversation_data),
     ) {
         Ok(mut conversation) => {
@@ -590,7 +590,7 @@ pub(crate) fn convert_tool_call_result_to_input(
                     RequestCommandOutputResult::Completed {
                         block_id: finished.command_id.clone().into(),
                         command: result.command.clone(),
-                        output: finished.output.clone(),
+                        output: cap_command_output(finished.output.clone()),
                         exit_code: ExitCode::from(finished.exit_code),
                         start_ts: finished
                             .start_ts

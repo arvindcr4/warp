@@ -1,5 +1,5 @@
 use core::fmt;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::error;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::rc::Rc;
@@ -22,6 +22,9 @@ use crate::util::parse_u32;
 use crate::{Entity, SingletonEntity};
 
 const MIN_REFRESH_DELAY_MS: u32 = 50;
+// Keep rendered-image cache memory bounded because rendered RGBA bytes can be much larger than
+// source-asset bytes and can grow from repeated size/fit variants.
+const MAX_RENDERED_IMAGE_CACHE_BYTES: usize = 128 * 1024 * 1024;
 
 static SVG_FONT_DB: LazyLock<Arc<usvg::fontdb::Database>> = LazyLock::new(|| {
     let mut fontdb = usvg::fontdb::Database::new();
@@ -387,6 +390,17 @@ impl Asset for ImageType {
 pub enum Image {
     Static(Arc<StaticImage>),
     Animated(Arc<AnimatedImage>),
+}
+
+impl Image {
+    fn approx_size_in_bytes(&self) -> usize {
+        match self {
+            Image::Static(image) => image.rgba_bytes().len(),
+            Image::Animated(image) => image.frames.iter().fold(0usize, |acc, frame| {
+                acc.saturating_add(frame.image.rgba_bytes().len())
+            }),
+        }
+    }
 }
 
 /// A representation of an image in the asset cache.
@@ -798,10 +812,84 @@ struct RenderedImageCacheKey {
 }
 
 #[derive(Default)]
+struct CachedImages {
+    map: HashMap<u64, HashMap<RenderedImageCacheKey, Rc<Image>>>,
+    order: VecDeque<(u64, RenderedImageCacheKey, usize)>,
+    total_bytes: usize,
+}
+
+impl CachedImages {
+    fn insert_with_budget(
+        &mut self,
+        outer: u64,
+        inner: RenderedImageCacheKey,
+        image: Rc<Image>,
+        max_bytes: usize,
+    ) {
+        let image_size = image.approx_size_in_bytes();
+        let inner_cache = &mut *self;
+        inner_cache
+            .map
+            .entry(outer)
+            .or_default()
+            .insert(inner, image);
+        inner_cache.order.push_back((outer, inner, image_size));
+        inner_cache.total_bytes = inner_cache.total_bytes.saturating_add(image_size);
+
+        while inner_cache.total_bytes > max_bytes && inner_cache.order.len() > 1 {
+            let Some((outer, inner, size)) = inner_cache.order.pop_front() else {
+                break;
+            };
+            inner_cache.total_bytes = inner_cache.total_bytes.saturating_sub(size);
+
+            if let Some(inner_map) = inner_cache.map.get_mut(&outer) {
+                inner_map.remove(&inner);
+                if inner_map.is_empty() {
+                    inner_cache.map.remove(&outer);
+                }
+            }
+        }
+    }
+
+    fn remove_asset(&mut self, outer: u64) {
+        let inner_cache = &mut *self;
+        if let Some(removed) = inner_cache.map.remove(&outer) {
+            let total_removed: usize = removed
+                .into_values()
+                .map(|image| image.approx_size_in_bytes())
+                .fold(0usize, usize::saturating_add);
+            inner_cache.total_bytes = inner_cache.total_bytes.saturating_sub(total_removed);
+        }
+
+        inner_cache
+            .order
+            .retain(|(cached_outer, _, _)| *cached_outer != outer);
+    }
+
+    fn remove_size(&mut self, outer: u64, inner: &RenderedImageCacheKey) {
+        let inner_cache = &mut *self;
+        if let Some(inner_map) = inner_cache.map.get_mut(&outer) {
+            if let Some(removed) = inner_map.remove(inner) {
+                inner_cache.total_bytes = inner_cache
+                    .total_bytes
+                    .saturating_sub(removed.approx_size_in_bytes());
+            }
+            if inner_map.is_empty() {
+                inner_cache.map.remove(&outer);
+            }
+        }
+
+        inner_cache.order.retain(|(cached_outer, cached_inner, _)| {
+            *cached_outer != outer || cached_inner != inner
+        });
+    }
+}
+
+#[derive(Default)]
 pub struct ImageCache {
     /// Map of rendered images of any ImageType already materialized for a certain size and fit.
     /// Uses the hashed AssetSource and rendered-image properties as a key.
-    images: RwLock<HashMap<u64, HashMap<RenderedImageCacheKey, Rc<Image>>>>,
+    images: RwLock<CachedImages>,
 }
 
 impl ImageCache {
@@ -816,7 +904,7 @@ impl ImageCache {
         asset_source.hash(&mut s);
         let cache_key = s.finish();
 
-        cache.remove(&cache_key);
+        cache.remove_asset(cache_key);
     }
 
     /// Removes a single cached rendered entry for an asset.
@@ -850,12 +938,7 @@ impl ImageCache {
         };
 
         let mut cache = self.images.write();
-        if let Some(inner_map) = cache.get_mut(&cache_key) {
-            inner_map.remove(&rendered_key);
-            if inner_map.is_empty() {
-                cache.remove(&cache_key);
-            }
-        }
+        cache.remove_size(cache_key, &rendered_key);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -932,7 +1015,7 @@ impl ImageCache {
                 // If it is already in the image cache at the target size and fit, return it.
                 let cache = if should_cache_rendered_image {
                     let cache = self.images.upgradable_read();
-                    if let Some(inner_map) = cache.get(&cache_key) {
+                    if let Some(inner_map) = cache.map.get(&cache_key) {
                         if let Some(image) = inner_map.get(&rendered_image_cache_key) {
                             return AssetState::Loaded {
                                 data: image.clone(),
@@ -953,10 +1036,12 @@ impl ImageCache {
                     };
                 if let Some(cache) = cache {
                     let mut images_cache = RwLockUpgradableReadGuard::upgrade(cache);
-                    images_cache
-                        .entry(cache_key)
-                        .or_default()
-                        .insert(rendered_image_cache_key, image.clone());
+                    images_cache.insert_with_budget(
+                        cache_key,
+                        rendered_image_cache_key,
+                        image.clone(),
+                        MAX_RENDERED_IMAGE_CACHE_BYTES,
+                    );
                 }
 
                 AssetState::Loaded { data: image }

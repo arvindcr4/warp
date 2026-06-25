@@ -468,7 +468,7 @@ fn deduplicate_overlapping_deltas(sorted_deltas: Vec<DiffDelta>) -> Vec<DiffDelt
         let prev_range = result
             .last()
             .filter(|prev| delta.replacement_line_range.start < prev.replacement_line_range.end)
-            .map(|prev| prev.replacement_line_range);
+            .map(|prev| prev.replacement_line_range.clone());
         if let Some(prev_range) = prev_range {
             log::warn!(
                 "Dropping V4A delta with overlapping range {:?} \

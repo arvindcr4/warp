@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use warp_core::context_flag::ContextFlag;
 use warp_core::features::FeatureFlag;
@@ -8,18 +9,19 @@ use warpui::{AppContext, Entity, ModelContext, ModelHandle, SingletonEntity};
 
 use super::{conversations, warp_drive};
 use crate::drive::settings::WarpDriveSettings;
+use crate::search::QueryFilter;
 use crate::search::action::CommandBindingDataSource;
 use crate::search::binding_source::BindingSource;
 use crate::search::command_palette::mixer::{CommandPaletteItemAction, ItemSummary};
 use crate::search::command_palette::new_session::NewSessionDataSource;
 use crate::search::command_palette::repos::RepoDataSource;
-use crate::search::command_palette::{files, launch_config, navigation, tabs, CommandPaletteMixer};
+use crate::search::command_palette::{CommandPaletteMixer, files, launch_config, navigation, tabs};
 use crate::search::data_source::QueryResult;
 use crate::search::files::model::FileSearchModel;
 use crate::search::mixer::AddAsyncSourceOptions;
-use crate::search::QueryFilter;
 use crate::session_management::SessionSource;
 use crate::settings::AISettings;
+use crate::util::bindings::CommandBinding;
 
 /// Store of all of the [`crate::search::DataSource`]s for the command palette.
 pub struct DataSourceStore {
@@ -317,6 +319,10 @@ impl DataSourceStore {
         app: &AppContext,
     ) -> Option<QueryResult<CommandPaletteItemAction>> {
         self.query_result_from_summary(&ItemSummary::Action { binding_id }, app)
+    }
+
+    pub fn binding(&self, binding_id: BindingId, app: &AppContext) -> Option<Arc<CommandBinding>> {
+        self.actions_data_source.as_ref(app).binding(binding_id)
     }
 }
 

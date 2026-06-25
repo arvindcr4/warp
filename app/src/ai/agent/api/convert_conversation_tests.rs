@@ -93,7 +93,7 @@ fn test_convert_conversation_data_to_ai_conversation_sets_restored_run_id() {
 
     let conversation = convert_conversation_data_to_ai_conversation(
         conversation_id,
-        &conversation_data,
+        conversation_data,
         test_server_metadata("server-token", Some(ambient_agent_task_id)),
         RestorationMode::Continue,
     )

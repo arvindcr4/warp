@@ -1,7 +1,8 @@
 use std::collections::hash_map::Entry;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 #[cfg(feature = "local_fs")]
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::Mutex;
 
 use ai::skills::SkillPathOrigin;
 use anyhow::anyhow;
@@ -58,6 +59,11 @@ pub use conversation_loader::{
 /// persisted set within this window; kept as defense-in-depth if rows ever
 /// arrive from another source (cross-machine import, prune bypass).
 pub(super) const MAX_HISTORICAL_CONVERSATIONS: usize = 200;
+
+/// Maximum number of full [`AIConversation`] objects to retain in memory.
+/// Metadata remains in `all_conversations_metadata` so evicted historical
+/// conversations can be loaded again through `load_conversation_data`.
+const MAX_RESIDENT_CONVERSATIONS: usize = 200;
 
 /// Metadata for conversations
 /// When created from local DB, has_local_data=true and server_metadata=None.
@@ -226,6 +232,13 @@ pub struct BlocklistAIHistoryModel {
     /// have ever been loaded into memory.
     conversations_by_id: HashMap<AIConversationId, AIConversation>,
 
+    /// Least-recently-used resident conversation order.
+    ///
+    /// The front is the oldest access; the back is the newest. This uses
+    /// interior mutability so read-only accessors can record use without
+    /// changing their public signatures.
+    resident_conversation_access_order: Mutex<VecDeque<AIConversationId>>,
+
     /// The active conversation ID for a given terminal view.
     /// The active conversation is the one we're currently or have most recently streamed outputs for.
     /// If you want to get the conversation the next query will follow up in / what is selected in the input selector,
@@ -310,6 +323,129 @@ impl BlocklistAIHistoryModel {
     #[cfg(test)]
     pub(crate) fn new_for_test() -> Self {
         Self::default()
+    }
+
+    fn touch_resident_conversation(&self, conversation_id: AIConversationId) {
+        if !self.conversations_by_id.contains_key(&conversation_id) {
+            return;
+        }
+
+        let Ok(mut access_order) = self.resident_conversation_access_order.lock() else {
+            return;
+        };
+        access_order.retain(|id| *id != conversation_id);
+        access_order.push_back(conversation_id);
+    }
+
+    fn forget_resident_conversation(&self, conversation_id: AIConversationId) {
+        let Ok(mut access_order) = self.resident_conversation_access_order.lock() else {
+            return;
+        };
+        access_order.retain(|id| *id != conversation_id);
+    }
+
+    fn insert_resident_conversation(
+        &mut self,
+        conversation_id: AIConversationId,
+        conversation: AIConversation,
+    ) -> Option<AIConversation> {
+        let previous = self
+            .conversations_by_id
+            .insert(conversation_id, conversation);
+        self.touch_resident_conversation(conversation_id);
+        previous
+    }
+
+    fn is_resident_conversation_evictable(&self, conversation_id: &AIConversationId) -> bool {
+        if !self.conversations_by_id.contains_key(conversation_id) {
+            return false;
+        }
+
+        let Some(metadata) = self.all_conversations_metadata.get(conversation_id) else {
+            return false;
+        };
+        if !metadata.has_local_data && metadata.server_conversation_token.is_none() {
+            return false;
+        }
+
+        let is_live = self
+            .live_conversation_ids_for_terminal_view
+            .values()
+            .any(|ids| ids.contains(conversation_id));
+        let is_cleared = self
+            .cleared_conversation_ids_for_terminal_view
+            .values()
+            .any(|ids| ids.contains(conversation_id));
+        let is_active = self
+            .active_conversation_for_terminal_view
+            .values()
+            .any(|id| id == conversation_id);
+        let is_in_rename = self
+            .in_flight_conversation_renames
+            .contains_key(conversation_id);
+        let is_parent_or_child = self.children_by_parent.contains_key(conversation_id)
+            || self
+                .children_by_parent
+                .values()
+                .any(|children| children.contains(conversation_id));
+
+        !is_live && !is_cleared && !is_active && !is_in_rename && !is_parent_or_child
+    }
+
+    /// Evicts least-recently-used historical conversations from
+    /// `conversations_by_id` while preserving metadata and all live/session
+    /// references.
+    ///
+    /// Only conversations with reloadable metadata are evictable. Direct
+    /// `conversation()` lookups still return `None` for evicted entries; the
+    /// supported rehydration path is `load_conversation_data`, which reloads
+    /// from local DB or server metadata and is used by history open/restore
+    /// flows before calling `restore_conversations`.
+    fn prune_resident_conversations(&mut self) {
+        if self.conversations_by_id.len() <= MAX_RESIDENT_CONVERSATIONS {
+            return;
+        }
+
+        let mut access_order = {
+            let Ok(mut access_order) = self.resident_conversation_access_order.lock() else {
+                return;
+            };
+            std::mem::take(&mut *access_order)
+        };
+
+        let mut tracked_ids: HashSet<AIConversationId> = access_order.iter().copied().collect();
+        for conversation_id in self.conversations_by_id.keys().copied() {
+            if tracked_ids.insert(conversation_id) {
+                access_order.push_back(conversation_id);
+            }
+        }
+
+        let mut retained_order = VecDeque::new();
+        while self.conversations_by_id.len() > MAX_RESIDENT_CONVERSATIONS {
+            let Some(candidate) = access_order.pop_front() else {
+                break;
+            };
+
+            if !self.conversations_by_id.contains_key(&candidate) {
+                continue;
+            }
+
+            if self.is_resident_conversation_evictable(&candidate) {
+                self.conversations_by_id.remove(&candidate);
+            } else {
+                retained_order.push_back(candidate);
+            }
+        }
+
+        retained_order.extend(
+            access_order
+                .into_iter()
+                .filter(|id| self.conversations_by_id.contains_key(id)),
+        );
+
+        if let Ok(mut access_order) = self.resident_conversation_access_order.lock() {
+            *access_order = retained_order;
+        }
     }
 
     /// Returns a flattened and ordered (oldest first) list of live conversations (not cleared) for the given terminal view ID.
@@ -401,13 +537,20 @@ impl BlocklistAIHistoryModel {
     /// * The ID is invalid
     /// * The conversation has never been read into memory from db. Use load_conversation_from_db to handle reading from db.
     pub fn conversation(&self, conversation_id: &AIConversationId) -> Option<&AIConversation> {
-        self.conversations_by_id.get(conversation_id)
+        let conversation = self.conversations_by_id.get(conversation_id);
+        if conversation.is_some() {
+            self.touch_resident_conversation(*conversation_id);
+        }
+        conversation
     }
 
     pub fn conversation_mut(
         &mut self,
         conversation_id: &AIConversationId,
     ) -> Option<&mut AIConversation> {
+        if self.conversations_by_id.contains_key(conversation_id) {
+            self.touch_resident_conversation(*conversation_id);
+        }
         self.conversations_by_id.get_mut(conversation_id)
     }
 
@@ -1034,8 +1177,7 @@ impl BlocklistAIHistoryModel {
             }
 
             let new_status = conversation.status().clone();
-            self.conversations_by_id
-                .insert(conversation_id, conversation);
+            self.insert_resident_conversation(conversation_id, conversation);
 
             // Emit UpdatedConversationStatus for restored conversations so that
             // the workspace can set tab indicators appropriately
@@ -1046,6 +1188,7 @@ impl BlocklistAIHistoryModel {
                 new_status,
             });
         }
+        self.prune_resident_conversations();
 
         // Emit event so AI document views can populate their terminal view references
         ctx.emit(BlocklistAIHistoryEvent::RestoredConversations {
@@ -1183,8 +1326,8 @@ impl BlocklistAIHistoryModel {
             .entry(terminal_view_id)
             .or_default()
             .push(new_conversation_id);
-        self.conversations_by_id
-            .insert(new_conversation_id, new_conversation);
+        self.insert_resident_conversation(new_conversation_id, new_conversation);
+        self.prune_resident_conversations();
 
         ctx.emit(BlocklistAIHistoryEvent::StartedNewConversation {
             new_conversation_id,
@@ -2063,6 +2206,7 @@ impl BlocklistAIHistoryModel {
 
         self.all_conversations_metadata.remove(&conversation_id);
         self.conversations_by_id.remove(&conversation_id);
+        self.forget_resident_conversation(conversation_id);
 
         if let Some(terminal_view_id) = terminal_view_id {
             if self
@@ -2539,8 +2683,7 @@ impl BlocklistAIHistoryModel {
                 .insert(token.clone(), conversation_id);
         }
 
-        self.conversations_by_id
-            .insert(conversation_id, conversation.clone());
+        self.insert_resident_conversation(conversation_id, conversation.clone());
 
         // This is harmless if we're opening the conversation immediately, but ensures it's in the conversation list right away if we fork in the background.
         let metadata = AIConversationMetadata::from(&conversation);
@@ -2550,6 +2693,7 @@ impl BlocklistAIHistoryModel {
         }
         self.all_conversations_metadata
             .insert(conversation_id, metadata);
+        self.prune_resident_conversations();
 
         Ok(conversation)
     }
@@ -2601,12 +2745,12 @@ impl BlocklistAIHistoryModel {
                 .insert(token.clone(), local_placeholder_id);
         }
 
-        self.conversations_by_id
-            .insert(local_placeholder_id, merged.clone());
+        self.insert_resident_conversation(local_placeholder_id, merged.clone());
 
         if let Some(parent_id) = self.resolved_parent_conversation_id_for_conversation(&merged) {
             self.index_child_conversation(local_placeholder_id, parent_id);
         }
+        self.prune_resident_conversations();
 
         Ok(merged)
     }
@@ -2617,6 +2761,9 @@ impl BlocklistAIHistoryModel {
         self.live_conversation_ids_for_terminal_view.clear();
         self.cleared_conversation_ids_for_terminal_view.clear();
         self.conversations_by_id.clear();
+        if let Ok(mut access_order) = self.resident_conversation_access_order.lock() {
+            access_order.clear();
+        }
         self.active_conversation_for_terminal_view.clear();
         self.ambient_agent_terminal_view_ids.clear();
         self.conversation_transcript_viewer_terminal_view_ids

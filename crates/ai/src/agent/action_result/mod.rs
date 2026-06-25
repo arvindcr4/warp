@@ -14,6 +14,33 @@ use warp_terminal::model::BlockId;
 use crate::agent::FileLocations;
 use crate::document::{AIDocumentId, AIDocumentVersion};
 
+/// Maximum number of bytes of shell command output retained in an AI agent
+/// conversation exchange. Outputs larger than this are head/tail truncated.
+pub const MAX_COMMAND_OUTPUT_BYTES: usize = 64 * 1024;
+
+/// Caps a command output string to [`MAX_COMMAND_OUTPUT_BYTES`] by keeping a
+/// head and tail window. Slicing is performed only on UTF-8 character
+/// boundaries.
+pub fn cap_command_output(output: String) -> String {
+    let len = output.len();
+    if len <= MAX_COMMAND_OUTPUT_BYTES {
+        return output;
+    }
+
+    let half = MAX_COMMAND_OUTPUT_BYTES / 2;
+    let head_end = output.floor_char_boundary(half);
+    let tail_start = output.ceil_char_boundary(len.saturating_sub(half));
+    let kept = head_end + (len - tail_start);
+    let truncated = len - kept;
+
+    format!(
+        "{}\n[... {} bytes truncated ...]\n{}",
+        &output[..head_end],
+        truncated,
+        &output[tail_start..],
+    )
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum AIAgentActionResultType {
     /// The output of a requested command.
@@ -365,23 +392,14 @@ impl FileContext {
         line_range: Option<Range<usize>>,
         last_modified: Option<SystemTime>,
     ) -> Self {
-        let string_content = if let AnyFileContent::StringContent(content) = content.clone() {
-            content
-        } else {
-            return Self {
-                file_name,
-                content,
-                line_range,
-                last_modified,
-                line_count: 0,
-            };
-        };
-
-        let line_count = string_content.lines().count();
+        // Count lines directly from the (borrowed) content instead of cloning the entire
+        // file body just to compute the line count. `AnyFileContent::line_count` returns
+        // `lines().count()` for text and `0` for binary, matching the prior behavior.
+        let line_count = content.line_count();
 
         Self {
             file_name,
-            content: AnyFileContent::StringContent(string_content),
+            content,
             line_range,
             last_modified,
             line_count,

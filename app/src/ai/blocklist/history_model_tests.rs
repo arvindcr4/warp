@@ -11,7 +11,7 @@ use warpui::{App, EntityId};
 use super::{
     convert_persisted_conversation_to_ai_conversation_with_metadata, AIConversationMetadata,
     AIQueryHistoryOutputStatus, BeginConversationRenameError, BlocklistAIHistoryEvent,
-    BlocklistAIHistoryModel, PersistedAIInput, PersistedAIInputType,
+    BlocklistAIHistoryModel, PersistedAIInput, PersistedAIInputType, MAX_RESIDENT_CONVERSATIONS,
 };
 use crate::ai::agent::api::ServerConversationToken;
 use crate::ai::agent::conversation::{
@@ -158,6 +158,19 @@ fn create_exchange_with_query(
     }
 }
 
+fn insert_reloadable_resident_conversation(
+    model: &mut BlocklistAIHistoryModel,
+) -> AIConversationId {
+    let conversation = AIConversation::new(false, false);
+    let conversation_id = conversation.id();
+    let metadata = AIConversationMetadata::from(&conversation);
+    model.insert_resident_conversation(conversation_id, conversation);
+    model
+        .all_conversations_metadata
+        .insert(conversation_id, metadata);
+    conversation_id
+}
+
 fn persisted_agent_conversation_from_update_event(event: ModelEvent) -> AgentConversation {
     let ModelEvent::UpdateMultiAgentConversation {
         conversation_id,
@@ -177,6 +190,82 @@ fn persisted_agent_conversation_from_update_event(event: ModelEvent) -> AgentCon
             last_modified_at: Utc::now().naive_utc(),
         },
         tasks: updated_tasks,
+    }
+}
+
+#[test]
+fn prune_resident_conversations_evicts_only_lru_reloadable_non_live_conversations() {
+    let mut model = BlocklistAIHistoryModel::new_for_test();
+    let live_terminal_view_id = EntityId::new();
+    let active_terminal_view_id = EntityId::new();
+    let cleared_terminal_view_id = EntityId::new();
+
+    let live_conversation_id = insert_reloadable_resident_conversation(&mut model);
+    let active_conversation_id = insert_reloadable_resident_conversation(&mut model);
+    let cleared_conversation_id = insert_reloadable_resident_conversation(&mut model);
+
+    model
+        .live_conversation_ids_for_terminal_view
+        .insert(live_terminal_view_id, vec![live_conversation_id]);
+    model
+        .active_conversation_for_terminal_view
+        .insert(active_terminal_view_id, active_conversation_id);
+    model
+        .cleared_conversation_ids_for_terminal_view
+        .insert(cleared_terminal_view_id, vec![cleared_conversation_id]);
+
+    let evictable_conversation_ids = (0..(MAX_RESIDENT_CONVERSATIONS + 5))
+        .map(|_| insert_reloadable_resident_conversation(&mut model))
+        .collect::<Vec<_>>();
+    let total_inserted = 3 + evictable_conversation_ids.len();
+
+    let _ = model.conversation(&evictable_conversation_ids[0]);
+    model.prune_resident_conversations();
+
+    assert_eq!(
+        model.conversations_by_id.len(),
+        MAX_RESIDENT_CONVERSATIONS,
+        "resident conversations should be capped when enough historical entries are evictable",
+    );
+    assert_eq!(
+        model.all_conversations_metadata.len(),
+        total_inserted,
+        "resident pruning must preserve metadata for evicted conversations",
+    );
+    assert!(
+        model
+            .conversations_by_id
+            .contains_key(&live_conversation_id),
+        "live conversations must not be evicted",
+    );
+    assert!(
+        model
+            .conversations_by_id
+            .contains_key(&active_conversation_id),
+        "active conversations must not be evicted",
+    );
+    assert!(
+        model
+            .conversations_by_id
+            .contains_key(&cleared_conversation_id),
+        "cleared conversations must not be evicted",
+    );
+    assert!(
+        model
+            .conversations_by_id
+            .contains_key(&evictable_conversation_ids[0]),
+        "a recently accessed historical conversation should remain resident",
+    );
+
+    for evicted_id in evictable_conversation_ids.iter().skip(1).take(8) {
+        assert!(
+            !model.conversations_by_id.contains_key(evicted_id),
+            "least-recently-used evictable conversation {evicted_id:?} should be pruned",
+        );
+        assert!(
+            model.all_conversations_metadata.contains_key(evicted_id),
+            "metadata for evicted conversation {evicted_id:?} should remain available",
+        );
     }
 }
 

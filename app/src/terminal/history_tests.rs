@@ -1019,3 +1019,111 @@ fn is_appendable_vs_is_queryable() {
         });
     });
 }
+
+#[test]
+fn test_session_commands_eviction_and_rebase() {
+    App::test((), |mut app| async move {
+        let mut history_handle = app.add_model(|_| History::default());
+        let session = Arc::new(Session::new(
+            SessionInfo::new_for_test()
+                .with_id(1)
+                .with_shell_type(ShellType::Bash),
+            Arc::new(TestCommandExecutor::default()),
+        ));
+        let session_id = session.id();
+
+        // 1. Initialize history with 2 histfile commands.
+        initialize_history_for_testing(
+            &mut history_handle,
+            session.clone(),
+            async { vec!["hist1".to_string(), "hist2".to_string()] },
+            Vec::new(),
+            &mut app,
+        )
+        .await;
+
+        // At this point:
+        // histfile_commands: ["hist1", "hist2"] (len = 2)
+        // session_commands: [] (len = 0)
+        // session_start_index: 2
+
+        history_handle.update(&mut app, |history, _| {
+            // Push "evict1" (will be evicted)
+            history.append_commands(
+                session_id,
+                vec![HistoryEntry::with_session_id(session_id, "evict1")],
+            ); // index 2
+
+            // Push "evict2" (will be evicted)
+            history.append_commands(
+                session_id,
+                vec![HistoryEntry::with_session_id(session_id, "evict2")],
+            ); // index 3
+
+            // Push "evict3" (will be evicted)
+            history.append_commands(
+                session_id,
+                vec![HistoryEntry::with_session_id(session_id, "evict3")],
+            ); // index 4
+
+            // Push "dup_shifted" (will NOT be evicted, old index 5)
+            history.append_commands(
+                session_id,
+                vec![HistoryEntry::with_session_id(session_id, "dup_shifted")],
+            ); // index 5
+
+            // Push "hist1" to make index 0 (in histfile) be added to skip_indices.
+            history.append_commands(
+                session_id,
+                vec![HistoryEntry::with_session_id(session_id, "hist1")],
+            ); // index 6, index 0 added to skip_indices.
+
+            // Now, we want to push enough unique commands to trigger eviction.
+            // Currently, session_commands has 5 entries (indices 2, 3, 4, 5, 6).
+            // We want to push (MAX_SESSION_COMMANDS_PER_HOST - 3) more unique commands, plus 1 duplicate of "dup_shifted".
+            // That will make the total session commands count = 5 + (MAX_SESSION_COMMANDS_PER_HOST - 3) + 1 = MAX_SESSION_COMMANDS_PER_HOST + 3.
+            // So excess will be 3.
+            let unique_to_push = super::MAX_SESSION_COMMANDS_PER_HOST - 3;
+            for i in 0..unique_to_push {
+                history.append_commands(
+                    session_id,
+                    vec![HistoryEntry::with_session_id(
+                        session_id,
+                        format!("cmd{}", i),
+                    )],
+                );
+            }
+
+            // Now push the duplicate of "dup_shifted"
+            history.append_commands(
+                session_id,
+                vec![HistoryEntry::with_session_id(session_id, "dup_shifted")],
+            );
+        });
+
+        history_handle.read(&app, |history, _| {
+            let skip_indices = history.session_skip_indices.get(&session_id).unwrap();
+            // Should contain 0 (from "hist1") and 2 (from "dup_shifted" which was at 5, and 5 - 3 = 2).
+            assert!(skip_indices.contains(&0));
+            assert!(skip_indices.contains(&2));
+            assert_eq!(skip_indices.len(), 2);
+
+            let start_index = history.session_start_indices.get(&session_id).unwrap();
+            // Originally start_index was 2.
+            // max(2, 2.saturating_sub(3)) = 2.
+            assert_eq!(*start_index, 2);
+
+            let cmds = history.commands(session_id).unwrap_or_default();
+            // hist1 is skipped, dup_shifted at index 2 (old 5) is skipped.
+            // So we should see:
+            // - hist2
+            // - hist1 (at rebased index 3, old index 6)
+            // - cmd0..
+            // - dup_shifted (at the end)
+            assert_eq!(cmds[0].command, "hist2");
+            assert_eq!(cmds[1].command, "hist1");
+            assert_eq!(cmds[2].command, "cmd0");
+            assert_eq!(cmds.last().unwrap().command, "dup_shifted");
+        });
+    });
+}

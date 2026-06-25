@@ -671,3 +671,211 @@ fn test_respects_max_dimensions_for_cacheoption_bysize() {
     // Assert that, when we specify a max dimension of 512, the image is resized accordingly.
     assert_eq!(image.img.dimensions(), (512, 512));
 }
+
+#[test]
+fn test_cached_images_insert_with_budget_evicts_oldest_fifo() {
+    let mut cached_images = CachedImages::default();
+
+    let key_1 = RenderedImageCacheKey {
+        bounds: Vector2I::new(1, 1),
+        fit_type: FitType::Cover,
+        animated_image_behavior: AnimatedImageBehavior::FullAnimation,
+    };
+    let key_2 = RenderedImageCacheKey {
+        bounds: Vector2I::new(2, 2),
+        fit_type: FitType::Cover,
+        animated_image_behavior: AnimatedImageBehavior::FullAnimation,
+    };
+    let key_3 = RenderedImageCacheKey {
+        bounds: Vector2I::new(3, 3),
+        fit_type: FitType::Cover,
+        animated_image_behavior: AnimatedImageBehavior::FullAnimation,
+    };
+
+    let image_1 = Rc::new(Image::Static(test_utils::make_static_image(3, 3)));
+    let image_2 = Rc::new(Image::Static(test_utils::make_static_image(4, 2)));
+    let image_3 = Rc::new(Image::Static(test_utils::make_static_image(5, 2)));
+    let max_bytes = 100;
+
+    cached_images.insert_with_budget(1, key_1, image_1, max_bytes);
+    cached_images.insert_with_budget(2, key_2, image_2, max_bytes);
+    cached_images.insert_with_budget(3, key_3, image_3, max_bytes);
+
+    assert_eq!(cached_images.order.len(), 2);
+    let first_key = cached_images.order.front().unwrap();
+    let second_key = cached_images.order.back().unwrap();
+    assert_eq!(first_key.0, 2);
+    assert_eq!(first_key.1, key_2);
+    assert_eq!(second_key.0, 3);
+    assert_eq!(second_key.1, key_3);
+    assert!(cached_images.map.contains_key(&3));
+    assert!(cached_images.map.contains_key(&2));
+    assert!(!cached_images.map.contains_key(&1));
+    assert!(cached_images.total_bytes <= max_bytes);
+}
+
+#[test]
+fn test_cached_images_single_large_image_is_retained_even_when_over_budget() {
+    let mut cached_images = CachedImages::default();
+
+    let key = RenderedImageCacheKey {
+        bounds: Vector2I::new(4, 4),
+        fit_type: FitType::Contain,
+        animated_image_behavior: AnimatedImageBehavior::FullAnimation,
+    };
+    let image = Rc::new(Image::Static(test_utils::make_static_image(10, 10)));
+
+    let max_bytes = 10;
+    cached_images.insert_with_budget(1, key, image, max_bytes);
+
+    assert_eq!(cached_images.order.len(), 1);
+    assert_eq!(cached_images.total_bytes, 400);
+    assert_eq!(cached_images.total_bytes > max_bytes, true);
+}
+
+#[test]
+fn test_cached_images_keeps_total_bytes_exact_during_evicts() {
+    let mut cached_images = CachedImages::default();
+
+    let max_bytes = 160;
+
+    let key_1 = RenderedImageCacheKey {
+        bounds: Vector2I::new(1, 1),
+        fit_type: FitType::Contain,
+        animated_image_behavior: AnimatedImageBehavior::FullAnimation,
+    };
+    let key_2 = RenderedImageCacheKey {
+        bounds: Vector2I::new(2, 2),
+        fit_type: FitType::Contain,
+        animated_image_behavior: AnimatedImageBehavior::FullAnimation,
+    };
+    let key_3 = RenderedImageCacheKey {
+        bounds: Vector2I::new(3, 3),
+        fit_type: FitType::Contain,
+        animated_image_behavior: AnimatedImageBehavior::FullAnimation,
+    };
+    let key_4 = RenderedImageCacheKey {
+        bounds: Vector2I::new(4, 4),
+        fit_type: FitType::Contain,
+        animated_image_behavior: AnimatedImageBehavior::FullAnimation,
+    };
+
+    cached_images.insert_with_budget(
+        1,
+        key_1,
+        Rc::new(Image::Static(test_utils::make_static_image(4, 4))),
+        max_bytes,
+    ); // 64
+    assert_eq!(cached_images.total_bytes, 64);
+
+    cached_images.insert_with_budget(
+        2,
+        key_2,
+        Rc::new(Image::Static(test_utils::make_static_image(5, 2))),
+        max_bytes,
+    ); // 40
+    assert_eq!(cached_images.total_bytes, 104);
+
+    cached_images.insert_with_budget(
+        3,
+        key_3,
+        Rc::new(Image::Static(test_utils::make_static_image(3, 4))),
+        max_bytes,
+    ); // 48
+    assert_eq!(cached_images.total_bytes, 152);
+
+    cached_images.insert_with_budget(
+        4,
+        key_4,
+        Rc::new(Image::Static(test_utils::make_static_image(2, 2))),
+        max_bytes,
+    ); // 16 => 168 then evict oldest 64
+    assert_eq!(cached_images.total_bytes, 104);
+    assert_eq!(cached_images.order.len(), 3);
+    assert_eq!(cached_images.order.front().unwrap().0, 2);
+    assert_eq!(cached_images.order.back().unwrap().0, 4);
+    let order_sum = cached_images
+        .order
+        .iter()
+        .map(|(_, _, bytes)| *bytes)
+        .sum::<usize>();
+    assert_eq!(order_sum, cached_images.total_bytes);
+}
+
+#[test]
+fn test_cached_images_remove_asset_and_remove_size_adjust_bytes_and_clear_inner_maps() {
+    let mut cached_images = CachedImages::default();
+    let max_bytes = 1024;
+
+    let key_a = RenderedImageCacheKey {
+        bounds: Vector2I::new(1, 1),
+        fit_type: FitType::Cover,
+        animated_image_behavior: AnimatedImageBehavior::FullAnimation,
+    };
+    let key_b = RenderedImageCacheKey {
+        bounds: Vector2I::new(2, 2),
+        fit_type: FitType::Cover,
+        animated_image_behavior: AnimatedImageBehavior::FullAnimation,
+    };
+    let key_c = RenderedImageCacheKey {
+        bounds: Vector2I::new(3, 3),
+        fit_type: FitType::Cover,
+        animated_image_behavior: AnimatedImageBehavior::FullAnimation,
+    };
+
+    let image_a = Rc::new(Image::Static(test_utils::make_static_image(4, 4)));
+    let image_b = Rc::new(Image::Static(test_utils::make_static_image(2, 2)));
+    let image_c = Rc::new(Image::Static(test_utils::make_static_image(1, 4)));
+
+    cached_images.insert_with_budget(1, key_a, image_a, max_bytes); // 64
+    cached_images.insert_with_budget(1, key_b, image_b, max_bytes); // 16
+    cached_images.insert_with_budget(2, key_c, image_c, max_bytes); // 16
+    assert_eq!(cached_images.total_bytes, 96);
+    assert_eq!(
+        cached_images.map.get(&1).expect("asset should exist").len(),
+        2
+    );
+
+    cached_images.remove_size(1, &key_b);
+    assert_eq!(cached_images.total_bytes, 80);
+    assert!(cached_images.map.contains_key(&1));
+    assert_eq!(
+        cached_images.map.get(&1).expect("asset should exist").len(),
+        1
+    );
+
+    cached_images.remove_size(1, &key_a);
+    assert_eq!(cached_images.total_bytes, 16);
+    assert!(!cached_images.map.contains_key(&1));
+    assert_eq!(cached_images.order.len(), 1);
+
+    cached_images.remove_asset(2);
+    assert_eq!(cached_images.total_bytes, 0);
+    assert!(!cached_images.map.contains_key(&2));
+    assert_eq!(cached_images.order.len(), 0);
+}
+
+#[test]
+fn test_image_cache_hit_returns_same_rendered_image() {
+    let asset_cache = new_asset_cache();
+    let image_cache = ImageCache::new();
+
+    let image_1 = load_bundled_image(
+        &image_cache,
+        &asset_cache,
+        "fit-test.rgba",
+        Vector2I::new(8, 8),
+        FitType::Contain,
+        AnimatedImageBehavior::FullAnimation,
+    );
+    let image_2 = load_bundled_image(
+        &image_cache,
+        &asset_cache,
+        "fit-test.rgba",
+        Vector2I::new(8, 8),
+        FitType::Contain,
+        AnimatedImageBehavior::FullAnimation,
+    );
+
+    assert!(Rc::ptr_eq(&image_1, &image_2));
+}

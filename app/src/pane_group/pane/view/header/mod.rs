@@ -1,7 +1,7 @@
 use std::fmt::Debug;
 
 use pathfinder_geometry::rect::RectF;
-use pathfinder_geometry::vector::{vec2f, Vector2F};
+use pathfinder_geometry::vector::{Vector2F, vec2f};
 use sharing::SharedPaneContent;
 use warp_core::features::FeatureFlag;
 use warp_core::settings::Setting;
@@ -18,8 +18,8 @@ use warpui::{
     ViewContext, ViewHandle,
 };
 
-use super::header_content::{HeaderContent, HeaderRenderContext, StandardHeaderOptions};
 use super::PaneDropTargetData;
+use super::header_content::{HeaderContent, HeaderRenderContext, StandardHeaderOptions};
 use crate::appearance::Appearance;
 use crate::menu::{Menu, MenuItem};
 use crate::pane_group::focus_state::{PaneFocusHandle, PaneGroupFocusEvent};
@@ -44,8 +44,8 @@ pub(crate) mod components;
 pub(crate) const PANE_HEADER_HEIGHT: f32 = 34.;
 const DRAG_SPLIT_THRESHOLD: f32 = 0.18;
 
-pub trait ActionPayload: Debug + Send + Sync + Clone + 'static {}
-impl<T: Debug + Send + Sync + Clone + 'static> ActionPayload for T {}
+pub trait ActionPayload: Debug + Clone + 'static {}
+impl<T: Debug + Clone + 'static> ActionPayload for T {}
 
 pub enum Event<A: ActionPayload, B: ActionPayload> {
     /// An item in the header's overflow menu was selected.

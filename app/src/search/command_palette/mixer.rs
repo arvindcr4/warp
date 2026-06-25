@@ -11,7 +11,6 @@ use crate::launch_configs::launch_config::LaunchConfig;
 use crate::search::command_palette::new_session::{NewSessionOption, NewSessionOptionId};
 use crate::search::mixer::SearchMixer;
 use crate::server::ids::SyncId;
-use crate::util::bindings::CommandBinding;
 use crate::workspace::PaneViewLocator;
 
 pub type CommandPaletteMixer = SearchMixer<CommandPaletteItemAction>;
@@ -20,7 +19,7 @@ pub type CommandPaletteMixer = SearchMixer<CommandPaletteItemAction>;
 pub enum CommandPaletteItemAction {
     /// A binding result was clicked.
     AcceptBinding {
-        binding: Arc<CommandBinding>,
+        binding_id: BindingId,
     },
     ExecuteWorkflow {
         id: SyncId,
@@ -88,8 +87,8 @@ pub enum CommandPaletteItemAction {
 impl CommandPaletteItemAction {
     pub fn to_summary(&self) -> ItemSummary {
         match self {
-            CommandPaletteItemAction::AcceptBinding { binding } => ItemSummary::Action {
-                binding_id: binding.id,
+            CommandPaletteItemAction::AcceptBinding { binding_id } => ItemSummary::Action {
+                binding_id: *binding_id,
             },
             CommandPaletteItemAction::OpenNotebook { id } => ItemSummary::Notebook { id: *id },
             CommandPaletteItemAction::ExecuteWorkflow { id } => ItemSummary::Workflow { id: *id },

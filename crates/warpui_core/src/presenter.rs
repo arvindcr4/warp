@@ -2,6 +2,7 @@ use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 use instant::Instant;
@@ -124,13 +125,13 @@ pub enum CursorUpdate {
 #[derive(Default, Clone)]
 pub struct PositionCache {
     /// A stack of pending positions to cache
-    pending_positions: Vec<HashMap<String, RectF>>,
+    pending_positions: Vec<HashMap<Arc<str>, RectF>>,
 
     /// The positions that have been committed to the cache.
-    committed_positions: HashMap<String, RectF>,
+    committed_positions: HashMap<Arc<str>, RectF>,
 
     /// Positions that are only cached for a single frame
-    single_frame_positions: HashSet<String>,
+    single_frame_positions: HashSet<Arc<str>>,
 
     /// Positions for a drop target. These positions are always cleared on every frame.
     drop_target_positions: Vec<DropTargetPosition>,
@@ -163,17 +164,23 @@ impl PositionCache {
 
     /// Caches a position in the current namespace.  This position will remain
     /// cached until it's explicitly cleared.
-    pub fn cache_position_indefinitely(&mut self, position_id: String, bounds: RectF) {
+    pub fn cache_position_indefinitely(&mut self, position_id: impl Into<Arc<str>>, bounds: RectF) {
+        let position_id = position_id.into();
         if let Some(last) = self.pending_positions.last_mut() {
-            last.insert(position_id.clone(), bounds);
-            self.single_frame_positions.remove(&position_id);
+            self.single_frame_positions.remove(position_id.as_ref());
+            last.insert(position_id, bounds);
         }
     }
 
     /// Caches a position in the current namespace until the next frame is rendered.
-    pub fn cache_position_for_one_frame(&mut self, position_id: String, bounds: RectF) {
+    pub fn cache_position_for_one_frame(
+        &mut self,
+        position_id: impl Into<Arc<str>>,
+        bounds: RectF,
+    ) {
+        let position_id = position_id.into();
         if let Some(last) = self.pending_positions.last_mut() {
-            last.insert(position_id.clone(), bounds);
+            last.insert(Arc::clone(&position_id), bounds);
             self.single_frame_positions.insert(position_id);
         }
     }
@@ -195,7 +202,7 @@ impl PositionCache {
     /// drop target positions--we don't permit them to be cached for multiple frames.
     pub fn clear_single_frame_positions(&mut self) {
         for position_id in self.single_frame_positions.drain() {
-            self.committed_positions.remove(&position_id);
+            self.committed_positions.remove(position_id.as_ref());
         }
         self.drop_target_positions.clear();
     }

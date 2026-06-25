@@ -7,13 +7,13 @@ use warpui::elements::{
     Align, ConstrainedBox, Container, Flex, Highlight, ParentElement, Shrinkable, Text,
 };
 use warpui::fonts::{Properties, Weight};
-use warpui::keymap::{DescriptionContext, Keystroke};
+use warpui::keymap::{BindingId, Keystroke};
 use warpui::ui_components::components::UiComponent;
 use warpui::{AppContext, Element, SingletonEntity};
 
 use crate::appearance::Appearance;
-use crate::drive::cloud_object_styling::warp_drive_icon_color;
 use crate::drive::DriveObjectType;
+use crate::drive::cloud_object_styling::warp_drive_icon_color;
 use crate::features::FeatureFlag;
 use crate::search::command_palette::mixer::CommandPaletteItemAction;
 use crate::search::command_palette::render_util::{
@@ -24,18 +24,40 @@ use crate::search::result_renderer::ItemHighlightState;
 use crate::ui_components::icons::Icon;
 use crate::util::bindings::{BindingGroup, CommandBinding};
 
+#[derive(Debug)]
+struct MatchedBindingData {
+    id: BindingId,
+    description: String,
+    trigger: Option<Keystroke>,
+    group: Option<BindingGroup>,
+}
+
+impl From<&CommandBinding> for MatchedBindingData {
+    fn from(binding: &CommandBinding) -> Self {
+        Self {
+            id: binding.id,
+            description: binding
+                .description
+                .in_context(warpui::keymap::DescriptionContext::Default)
+                .to_owned(),
+            trigger: binding.trigger.clone(),
+            group: binding.group,
+        }
+    }
+}
+
 /// A matched binding from a search query.
 #[derive(Debug)]
 pub struct MatchedBinding {
     fuzzy_match_result: FuzzyMatchResult,
-    binding: Arc<CommandBinding>,
+    binding: Arc<MatchedBindingData>,
 }
 
 impl MatchedBinding {
     pub fn new(fuzzy_match_result: FuzzyMatchResult, binding: Arc<CommandBinding>) -> Self {
         Self {
             fuzzy_match_result,
-            binding,
+            binding: Arc::new(MatchedBindingData::from(binding.as_ref())),
         }
     }
 
@@ -76,10 +98,7 @@ impl MatchedBinding {
         appearance: &Appearance,
     ) -> Box<dyn Element> {
         Text::new_inline(
-            self.binding
-                .description
-                .in_context(DescriptionContext::Default)
-                .to_owned(),
+            self.binding.description.clone(),
             appearance.ui_font_family(),
             appearance.monospace_font_size(),
         )
@@ -136,7 +155,7 @@ impl SearchItem for MatchedBinding {
 
     fn accept_result(&self) -> Self::Action {
         CommandPaletteItemAction::AcceptBinding {
-            binding: self.binding.clone(),
+            binding_id: self.binding.id,
         }
     }
 
@@ -149,10 +168,7 @@ impl SearchItem for MatchedBinding {
 
         format!(
             "Selected {}, {}.",
-            &self
-                .binding
-                .description
-                .in_context(DescriptionContext::Default),
+            &self.binding.description,
             trigger.map(Keystroke::normalized).unwrap_or_default()
         )
     }

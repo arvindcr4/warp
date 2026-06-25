@@ -1700,7 +1700,6 @@ pub extern "C-unwind" fn warp_dealloc_window(native_window: &mut Object) {
             .store(true, Ordering::SeqCst);
 
         let window = &*(native_window as *const Object).cast::<NSWindow>();
-        let window = &*(native_window as *const Object).cast::<NSWindow>();
 
         // Remove the window state from the content NSView and drop a reference.
         let native_view = window
@@ -1740,7 +1739,7 @@ pub unsafe fn get_window_state(object: &Object) -> &Rc<WindowState> {
 /// the ivar in that window, the inner `Rc<RefCell<...>>`s would be dropped a
 /// second time. Use this from every `extern "C-unwind"` callback that takes
 /// a view/window/delegate pointer, and early-return when it yields `None`.
-pub unsafe fn get_window_state_if_alive<'a>(object: &Object) -> Option<&'a Rc<WindowState>> {
+pub unsafe fn get_window_state_if_alive<'a>(object: &'a Object) -> Option<&'a Rc<WindowState>> {
     let state = get_window_state(object);
     if state.is_being_deallocated.load(Ordering::SeqCst) {
         None

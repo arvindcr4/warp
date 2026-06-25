@@ -176,6 +176,8 @@ impl CommandHistorySummary {
     }
 }
 
+pub const MAX_SESSION_COMMANDS_PER_HOST: usize = 5000;
+
 #[derive(Default, Debug)]
 pub struct History {
     /// For each ShellHost, the de-duped commands from the sqlite "commands" table is stored here.
@@ -187,8 +189,8 @@ pub struct History {
     /// shared between sessions.
     history_file_commands: HashMap<ShellHost, Vec<Arc<HistoryEntry>>>,
 
-    /// Global history entries across all sessions for each host.  Only grows.  Deduping
-    /// is handled by marking session_skip_indices.
+    /// Global history entries across all sessions for each host. Capped to MAX_SESSION_COMMANDS_PER_HOST.
+    /// Deduping is handled by marking session_skip_indices.
     /// Note that restored block commands are appended to session_commands on startup.
     /// Note: To present commands chronologically across hosts, we can add a timestamp to each history entry
     session_commands: HashMap<ShellHost, Vec<Arc<HistoryEntry>>>,
@@ -670,7 +672,8 @@ impl History {
                 .insert(host.clone(), session_commands_to_append);
         }
 
-        self.initialize_session_start_and_skip_indices(session_ids, host, start_index, ctx);
+        self.initialize_session_start_and_skip_indices(session_ids, host.clone(), start_index, ctx);
+        self.evict_excess_session_commands(&host);
     }
 
     /// Initializes the 'session start index' and 'skip indices' for the given session.
@@ -758,13 +761,13 @@ impl History {
     /// the given commands once the read is complete. Otherwise, synchronously appends the given
     /// commands.
     pub fn append_commands(&mut self, session_id: SessionId, commands: Vec<HistoryEntry>) {
-        let Some(shell_host) = self.session_id_to_shell_host.get(&session_id) else {
+        let Some(shell_host) = self.session_id_to_shell_host.get(&session_id).cloned() else {
             log::warn!("ShellHost should be populated in the map for all bootstrapped sessions.");
             return;
         };
         match self
             .read_history_file_state
-            .get_mut(shell_host)
+            .get_mut(&shell_host)
             .expect("ReadHistoryFileState should exist for session.")
         {
             ReadHistoryFileState::InProgress {
@@ -772,6 +775,10 @@ impl History {
                 ..
             } => {
                 session_commands_to_append.extend(commands.into_iter().map(Arc::new));
+                if session_commands_to_append.len() > MAX_SESSION_COMMANDS_PER_HOST {
+                    let excess = session_commands_to_append.len() - MAX_SESSION_COMMANDS_PER_HOST;
+                    session_commands_to_append.drain(0..excess);
+                }
             }
             ReadHistoryFileState::Done => {
                 let mut commands_set = HashSet::new();
@@ -787,14 +794,15 @@ impl History {
                     }
                 }
 
-                let Some(history_file_commands) = self.history_file_commands.get(shell_host) else {
+                let Some(history_file_commands) = self.history_file_commands.get(&shell_host)
+                else {
                     log::warn!(
                         "history_file_commands should be set if ReadHistoryFileState is Done."
                     );
                     return;
                 };
 
-                let Some(session_commands) = self.session_commands.get_mut(shell_host) else {
+                let Some(session_commands) = self.session_commands.get_mut(&shell_host) else {
                     log::warn!("session_commands should be set if ReadHistoryFileState is Done.");
                     return;
                 };
@@ -821,6 +829,46 @@ impl History {
                 for idx in commands_set_skip_indices {
                     let entry = skip_indices.entry(session_id).or_default();
                     entry.insert(last_index + idx + 1);
+                }
+            }
+        }
+
+        self.evict_excess_session_commands(&shell_host);
+    }
+
+    fn evict_excess_session_commands(&mut self, shell_host: &ShellHost) {
+        if let Some(session_commands) = self.session_commands.get_mut(shell_host) {
+            if session_commands.len() > MAX_SESSION_COMMANDS_PER_HOST {
+                let excess = session_commands.len() - MAX_SESSION_COMMANDS_PER_HOST;
+                session_commands.drain(0..excess);
+
+                let histfile_len = self
+                    .history_file_commands
+                    .get(shell_host)
+                    .map(|v| v.len())
+                    .unwrap_or(0);
+
+                let session_ids: Vec<SessionId> = self
+                    .session_id_to_shell_host
+                    .iter()
+                    .filter(|(_, host)| *host == shell_host)
+                    .map(|(session_id, _)| *session_id)
+                    .collect();
+
+                for session_id in session_ids {
+                    if let Some(start_idx) = self.session_start_indices.get_mut(&session_id) {
+                        *start_idx = std::cmp::max(histfile_len, start_idx.saturating_sub(excess));
+                    }
+                    if let Some(skip_indices) = self.session_skip_indices.get_mut(&session_id) {
+                        let old_skip_indices = std::mem::take(skip_indices);
+                        for idx in old_skip_indices {
+                            if idx < histfile_len {
+                                skip_indices.insert(idx);
+                            } else if idx >= histfile_len + excess {
+                                skip_indices.insert(idx - excess);
+                            }
+                        }
+                    }
                 }
             }
         }

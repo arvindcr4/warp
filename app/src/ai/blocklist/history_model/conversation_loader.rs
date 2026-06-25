@@ -127,7 +127,7 @@ pub async fn load_conversation_from_server(
                     // Convert Oz conversations to an AIConversation.
                     match convert_conversation_data_to_ai_conversation(
                         conversation_id,
-                        &conversation_data,
+                        conversation_data,
                         server_metadata,
                         RestorationMode::Continue,
                     ) {
@@ -564,8 +564,7 @@ impl BlocklistAIHistoryModel {
                             agent_conversation.clone(),
                         )
                     {
-                        self.conversations_by_id
-                            .insert(conversation_id, child_conversation);
+                        self.insert_resident_conversation(conversation_id, child_conversation);
                     } else {
                         log::warn!(
                             "Failed to eagerly hydrate orchestration child {conversation_id}; \
@@ -692,5 +691,6 @@ impl BlocklistAIHistoryModel {
             })
             .collect();
         self.all_conversations_metadata = collected;
+        self.prune_resident_conversations();
     }
 }

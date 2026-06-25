@@ -1336,7 +1336,7 @@ impl AgentDriverRunner {
                     .map_err(|err| AgentDriverError::ConversationLoadFailed(format!("{err}")))?;
                 let conversation = convert_conversation_data_to_ai_conversation(
                     AIConversationId::default(),
-                    &conversation_data,
+                    conversation_data,
                     metadata,
                     RestorationMode::Continue,
                 )

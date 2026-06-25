@@ -5,8 +5,8 @@ use std::sync::{Arc, Weak};
 
 use parking_lot::Mutex;
 
-use super::context::ViewContext;
 use super::View;
+use super::context::ViewContext;
 use crate::core::RefCounts;
 use crate::{AppContext, EntityId, WindowId};
 
@@ -144,12 +144,14 @@ impl<T> Drop for ViewHandle<T> {
 }
 
 // SAFETY: `ViewHandle<T>` only contains `WindowId`/`EntityId` (Copy),
-// `PhantomData<T>`, and `Weak<Mutex<RefCounts>>`. `PhantomData<T>` is
-// `Send + Sync` iff `T` is `Send + Sync`; the other fields are already
-// `Send + Sync`. The `T: Send + Sync` bound prevents smuggling
-// non-`Send`/`!Sync` state from `T` across threads via the handle.
-unsafe impl<T: Send + Sync> Send for ViewHandle<T> {}
-unsafe impl<T: Send + Sync> Sync for ViewHandle<T> {}
+// `PhantomData<T>`, and `Weak<Mutex<RefCounts>>`. It does not contain or
+// dereference a `T` by itself; all APIs that can reach the view require an
+// `AppContext` or `ViewContext`, which are main-thread UI contexts. Moving or
+// sharing a handle across threads can only move the ids and clone/drop the weak
+// ref-count pointer, so `T`'s internals cannot be accessed off-thread through
+// the handle.
+unsafe impl<T> Send for ViewHandle<T> {}
+unsafe impl<T> Sync for ViewHandle<T> {}
 
 /// A type-erased strong reference to a particular [`View`] instance within the
 /// application.
@@ -298,10 +300,11 @@ impl<T> Debug for WeakViewHandle<T> {
 }
 
 // SAFETY: `WeakViewHandle<T>` only contains `EntityId` (Copy) and
-// `PhantomData<T>`. `PhantomData<T>` is `Send + Sync` iff `T` is. The
-// `T: Send + Sync` bound enforces the same invariant as `ViewHandle`.
-unsafe impl<T: Send + Sync> Send for WeakViewHandle<T> {}
-unsafe impl<T: Send + Sync> Sync for WeakViewHandle<T> {}
+// `PhantomData<T>`. Upgrading it to a strong view handle requires an
+// `AppContext`, so a weak handle cannot access `T` without returning to the
+// main-thread UI context.
+unsafe impl<T> Send for WeakViewHandle<T> {}
+unsafe impl<T> Sync for WeakViewHandle<T> {}
 
 pub trait ViewAsRef {
     fn view<T: View>(&self, handle: &ViewHandle<T>) -> &T;

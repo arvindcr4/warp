@@ -28,22 +28,22 @@ use crate::cloud_object::model::persistence::CloudModel;
 use crate::drive::CloudObjectTypeAndId;
 use crate::palette::PaletteMode;
 use crate::pane_group::pane::welcome_view::WelcomeViewAction;
+use crate::search::QueryFilter;
 use crate::search::action::search_item::MatchedBinding;
 use crate::search::action::{CommandBindingDataSource, Event as CommandBindingDataSourceEvent};
 use crate::search::binding_source::BindingSource;
 use crate::search::command_palette::conversations::{self};
 use crate::search::command_palette::mixer::CommandPaletteItemAction;
 use crate::search::command_palette::new_session::{AllowedSessionKinds, NewSessionDataSource};
-use crate::search::command_palette::{launch_config, warp_drive, CommandPaletteMixer};
+use crate::search::command_palette::{CommandPaletteMixer, launch_config, warp_drive};
 use crate::search::command_search::projects::project_data_source::ProjectDataSource;
 use crate::search::command_search::projects::{ProjectSearchItem, SuggestedProjectsDataSource};
 use crate::search::data_source::QueryResult;
-use crate::search::mixer::{dedupe_score, DedupeStrategy};
+use crate::search::mixer::{DedupeStrategy, dedupe_score};
 use crate::search::result_renderer::QueryResultRenderer;
 use crate::search::search_bar::{
     SearchBar, SearchBarEvent, SearchBarState, SearchResultOrdering, SelectionUpdate,
 };
-use crate::search::QueryFilter;
 use crate::send_telemetry_from_ctx;
 use crate::server::ids::SyncId;
 use crate::server::telemetry::TelemetryEvent;
@@ -135,6 +135,7 @@ pub struct WelcomePalette {
     /// Placeholder element to render when no results are found.
     placeholder_query_renderer: QueryResultRenderer<CommandPaletteItemAction>,
     binding_source: ModelHandle<BindingSource>,
+    actions_data_source: ModelHandle<CommandBindingDataSource>,
     zero_state_items: Vec<QueryResultRenderer<CommandPaletteItemAction>>,
     selected_item: SelectedItem,
     project_data_source: ModelHandle<ProjectDataSource>,
@@ -299,6 +300,7 @@ impl WelcomePalette {
             state_handles: Default::default(),
             placeholder_query_renderer: placeholder_element,
             binding_source,
+            actions_data_source,
             project_data_source,
             conversations_data_source,
             open_project_keybinding,
@@ -786,9 +788,14 @@ impl WelcomePalette {
         ctx: &mut ViewContext<Self>,
     ) {
         match &result_action {
-            CommandPaletteItemAction::AcceptBinding { binding } => {
-                if let Some(action) = binding.action.as_deref() {
-                    self.dispatch_typed_action_on_view(action, ctx);
+            CommandPaletteItemAction::AcceptBinding { binding_id } => {
+                if let Some(action) = self
+                    .actions_data_source
+                    .as_ref(ctx)
+                    .binding(*binding_id)
+                    .and_then(|binding| binding.action.clone())
+                {
+                    self.dispatch_typed_action_on_view(action.as_ref(), ctx);
                 };
             }
             CommandPaletteItemAction::NewConversationInProject {

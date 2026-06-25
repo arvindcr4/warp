@@ -7,7 +7,7 @@ use std::fmt::Debug;
 ///
 /// - `Any` to support downcasting to the absolute type
 /// - `Debug` so that we can show log messages about the action as it is dispatched
-pub trait Action: Any + Debug + Send + Sync {
+pub trait Action: Any + Debug {
     /// Convert this `Action` into a `dyn Any` reference, necessary for passing to the handler
     /// function, as trait upcasting isn't yet stable, so we can't treat a value of `&dyn Action`
     /// as a value of `&dyn Any` directly.
@@ -22,7 +22,7 @@ pub trait Action: Any + Debug + Send + Sync {
 /// automatically be treated as an `Action`, without the app needing to do anything special
 impl<T> Action for T
 where
-    T: Any + Debug + Send + Sync,
+    T: Any + Debug,
 {
     fn as_any(&self) -> &dyn Any {
         self
