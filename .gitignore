@@ -70,3 +70,8 @@ __pycache__/
 # Project notes
 .note/
 prebuilt/
+
+# Local runtime SQLite database files
+storage.sqlite3
+storage.sqlite3-shm
+storage.sqlite3-wal
